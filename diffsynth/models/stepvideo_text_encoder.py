@@ -23,7 +23,8 @@ from einops import rearrange
 import json
 from typing import List
 from functools import wraps
-import warnings
+
+from ..utils.attention_backend import AttentionBackendError, run_attention_backend
 
 
 
@@ -242,17 +243,6 @@ class Wrapped_StepChatTokenizer(StepChatTokenizer):
 
 
 
-def flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=True,
-                    return_attn_probs=False, tp_group_rank=0, tp_group_size=1):
-    softmax_scale = q.size(-1) ** (-0.5) if softmax_scale is None else softmax_scale
-    if hasattr(torch.ops.Optimus, "fwd"):
-        results = torch.ops.Optimus.fwd(q, k, v, None, dropout_p, softmax_scale, causal, return_attn_probs, None, tp_group_rank, tp_group_size)[0]
-    else:
-        warnings.warn("Cannot load `torch.ops.Optimus.fwd`. Using `torch.nn.functional.scaled_dot_product_attention` instead.")
-        results = torch.nn.functional.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True, scale=softmax_scale).transpose(1, 2)
-    return results
-
-
 class FlashSelfAttention(torch.nn.Module):
     def __init__(
         self,
@@ -263,12 +253,18 @@ class FlashSelfAttention(torch.nn.Module):
 
 
     def forward(self, q, k, v, cu_seqlens=None, max_seq_len=None):
-        if cu_seqlens is None:
-            output = flash_attn_func(q, k, v, dropout_p=self.dropout_p)
-        else:
-            raise ValueError('cu_seqlens is not supported!')
+        if cu_seqlens is not None:
+            raise AttentionBackendError(
+                "The selected attention backend does not support cu_seqlens "
+                "in the StepVideo text encoder."
+            )
 
-        return output
+        b, s, h, d = q.shape
+        q_flat = rearrange(q, "b s h d -> b s (h d)")
+        k_flat = rearrange(k, "b s h d -> b s (h d)")
+        v_flat = rearrange(v, "b s h d -> b s (h d)")
+        output = run_attention_backend(q_flat, k_flat, v_flat, h, dropout_p=self.dropout_p)
+        return rearrange(output, "b s (h d) -> b s h d", h=h)
 
 
     

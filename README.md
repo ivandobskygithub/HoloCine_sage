@@ -65,6 +65,8 @@ If you encounter environment problem when installing FlashAttention-3, you can r
 
 If you cannot install FlashAttention-3, you can use FlashAttention-2 as an alternative, and our code will automatically detect the FlashAttention version. It will be slower than FlashAttention-3,but can also produce the right result.
 
+We additionally support SageAttention 2++ and SageAttention 3. By default the runtime selects the fastest available backend in the following order: FlashAttention v3, SageAttention 3, FlashAttention v2, SageAttention 2++, and finally PyTorch's native scaled dot-product attention. You can override this behaviour via the ``HOLOCINE_ATTENTION_BACKEND`` environment variable, e.g. ``HOLOCINE_ATTENTION_BACKEND=sage3`` to force SageAttention 3 or ``HOLOCINE_ATTENTION_BACKEND=pytorch`` to fall back to PyTorch.
+
 If you want to install FlashAttention-2, you can use the following command:
 ```shell
 pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.4cxx11abiFALSE-cp310-cp310-linux_x86_64.whl

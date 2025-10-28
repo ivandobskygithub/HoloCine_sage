@@ -1,42 +1,18 @@
+import math
+from typing import List, Optional, Sequence, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Tuple, Optional
 from einops import rearrange
+
+from ..utils.attention_backend import (
+    AttentionBackendError,
+    get_varlen_attention_func,
+    run_attention_backend,
+)
 from .utils import hash_state_dict_keys
 from .wan_video_camera_controller import SimpleAdapter
-try:
-    import flash_attn_interface
-    FLASH_ATTN_3_AVAILABLE = True
-except ModuleNotFoundError:
-    FLASH_ATTN_3_AVAILABLE = False
-
-try:
-    import flash_attn
-    FLASH_ATTN_2_AVAILABLE = True
-except ModuleNotFoundError:
-    FLASH_ATTN_2_AVAILABLE = False
-
-try:
-    from sageattention import sageattn
-    SAGE_ATTN_AVAILABLE = True
-except ModuleNotFoundError:
-    SAGE_ATTN_AVAILABLE = False
-
-from einops import rearrange
-from typing import List, Sequence, Optional
-print("FLASH_ATTN_3_AVAILABLE ",FLASH_ATTN_3_AVAILABLE)
-print("FLASH_ATTN_2_AVAILABLE",FLASH_ATTN_2_AVAILABLE)
-try:
-    from flash_attn_interface import flash_attn_varlen_func
-except:
-        
-
-    try:
-        from flash_attn.flash_attn_interface import flash_attn_varlen_func
-    except Exception as e:
-        flash_attn_varlen_func = None
 
 # def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads: int, compatibility_mode=False):
 #     if compatibility_mode:
@@ -73,7 +49,15 @@ except:
 #         x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
 #     return x
 
-def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads: int, compatibility_mode=False,attn_mask=None,shot_latent_indices=None):
+def flash_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    num_heads: int,
+    compatibility_mode: bool = False,
+    attn_mask: Optional[torch.Tensor] = None,
+    shot_latent_indices=None,
+):
 
     if attn_mask is not None:
 
@@ -84,48 +68,18 @@ def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads
         x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
     else:
         if shot_latent_indices is not None:
-        
-            q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
-            k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
-            v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
-          
-
-         
-            x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
+            raise AttentionBackendError(
+                "flash_attention does not implement variable-length attention. "
+                "Call attention_per_batch_with_shots when shot_latent_indices are provided."
+            )
         elif compatibility_mode:
             q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
             k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
             v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
             x = F.scaled_dot_product_attention(q, k, v)
             x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
-        elif FLASH_ATTN_3_AVAILABLE:
-            q = rearrange(q, "b s (n d) -> b s n d", n=num_heads)
-            k = rearrange(k, "b s (n d) -> b s n d", n=num_heads)
-            v = rearrange(v, "b s (n d) -> b s n d", n=num_heads)
-            x = flash_attn_interface.flash_attn_func(q, k, v)
-            if isinstance(x,tuple):
-                x = x[0]
-            x = rearrange(x, "b s n d -> b s (n d)", n=num_heads)
-        elif FLASH_ATTN_2_AVAILABLE:
-            # print("flas_attn_2")
-            q = rearrange(q, "b s (n d) -> b s n d", n=num_heads)
-            k = rearrange(k, "b s (n d) -> b s n d", n=num_heads)
-            v = rearrange(v, "b s (n d) -> b s n d", n=num_heads)
-            x = flash_attn.flash_attn_func(q, k, v)
-            x = rearrange(x, "b s n d -> b s (n d)", n=num_heads)
-        elif SAGE_ATTN_AVAILABLE:
-            q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
-            k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
-            v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
-            x = sageattn(q, k, v)
-            x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
         else:
-            q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
-            k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
-            v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
-
-            x = F.scaled_dot_product_attention(q, k, v)
-            x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
+            x = run_attention_backend(q, k, v, num_heads)
     return x
 
 def build_global_reps_from_shots(
@@ -211,8 +165,12 @@ def attention_per_batch_with_shots(
 
     outputs = []
 
+    flash_attn_varlen_func = get_varlen_attention_func()
     if flash_attn_varlen_func is None:
-        raise RuntimeError("flash_attn_varlen_func not available. Please install flash-attn v2+.")
+        raise AttentionBackendError(
+            "Variable-length attention requires FlashAttention v2/v3. "
+            "Select one of those backends or disable shot_latent_indices."
+        )
 
     for bi in range(b):
 
