@@ -1087,6 +1087,13 @@ class WanVideoVAE(nn.Module):
         return x
 
 
+    def _get_model_dtype(self):
+        try:
+            return next(self.model.parameters()).dtype
+        except StopIteration:
+            return torch.float32
+
+
     def build_mask(self, data, is_bound, border_width):
         _, _, _, H, W = data.shape
         h = self.build_1d_mask(H, is_bound[0], is_bound[1], border_width[0])
@@ -1116,14 +1123,16 @@ class WanVideoVAE(nn.Module):
 
         data_device = "cpu"
         computation_device = device
+        model_dtype = self._get_model_dtype()
+        target_dtype = hidden_states.dtype
 
         out_T = T * 4 - 3
         weight = torch.zeros((1, 1, out_T, H * self.upsampling_factor, W * self.upsampling_factor), dtype=hidden_states.dtype, device=data_device)
         values = torch.zeros((1, 3, out_T, H * self.upsampling_factor, W * self.upsampling_factor), dtype=hidden_states.dtype, device=data_device)
 
         for h, h_, w, w_ in tqdm(tasks, desc="VAE decoding"):
-            hidden_states_batch = hidden_states[:, :, :, h:h_, w:w_].to(computation_device)
-            hidden_states_batch = self.model.decode(hidden_states_batch, self.scale).to(data_device)
+            hidden_states_batch = hidden_states[:, :, :, h:h_, w:w_].to(device=computation_device, dtype=model_dtype)
+            hidden_states_batch = self.model.decode(hidden_states_batch, self.scale).to(device=data_device, dtype=target_dtype)
 
             mask = self.build_mask(
                 hidden_states_batch,
@@ -1168,14 +1177,16 @@ class WanVideoVAE(nn.Module):
 
         data_device = "cpu"
         computation_device = device
+        model_dtype = self._get_model_dtype()
+        target_dtype = video.dtype
 
         out_T = (T + 3) // 4
         weight = torch.zeros((1, 1, out_T, H // self.upsampling_factor, W // self.upsampling_factor), dtype=video.dtype, device=data_device)
         values = torch.zeros((1, self.z_dim, out_T, H // self.upsampling_factor, W // self.upsampling_factor), dtype=video.dtype, device=data_device)
 
         for h, h_, w, w_ in tqdm(tasks, desc="VAE encoding"):
-            hidden_states_batch = video[:, :, :, h:h_, w:w_].to(computation_device)
-            hidden_states_batch = self.model.encode(hidden_states_batch, self.scale).to(data_device)
+            hidden_states_batch = video[:, :, :, h:h_, w:w_].to(device=computation_device, dtype=model_dtype)
+            hidden_states_batch = self.model.encode(hidden_states_batch, self.scale).to(device=data_device, dtype=target_dtype)
 
             mask = self.build_mask(
                 hidden_states_batch,
@@ -1204,14 +1215,18 @@ class WanVideoVAE(nn.Module):
 
 
     def single_encode(self, video, device):
-        video = video.to(device)
-        x = self.model.encode(video, self.scale)
+        model_dtype = self._get_model_dtype()
+        target_dtype = video.dtype
+        video = video.to(device=device, dtype=model_dtype)
+        x = self.model.encode(video, self.scale).to(dtype=target_dtype)
         return x
 
 
     def single_decode(self, hidden_state, device):
-        hidden_state = hidden_state.to(device)
-        video = self.model.decode(hidden_state, self.scale)
+        model_dtype = self._get_model_dtype()
+        target_dtype = hidden_state.dtype
+        hidden_state = hidden_state.to(device=device, dtype=model_dtype)
+        video = self.model.decode(hidden_state, self.scale).to(dtype=target_dtype)
         return video.clamp_(-1, 1)
 
 
