@@ -186,13 +186,13 @@ def run_inference(
 # --- 1. Load Model (Done once) ---
 device = 'cuda'
 pipe = WanVideoHoloCinePipeline.from_pretrained(
-    torch_dtype=torch.bfloat16,
+    torch_dtype=torch.float8_e4m3fn,
     device=device,
     model_configs=[
-        ModelConfig(path="./checkpoints/Wan2.2-T2V-A14B//Wan2.2-T2V-A14B/models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
-        ModelConfig(path="./checkpoints/HoloCine_dit/sparse/sparse_high_noise.safetensors", offload_device="cpu"),
-        ModelConfig(path="./checkpoints/HoloCine_dit/sparse/sparse_low_noise.safetensors",  offload_device="cpu"),
-        ModelConfig(path="./checkpoints/Wan2.2-T2V-A14B/Wan2.2-T2V-A14B/Wan2.1_VAE.pth", offload_device="cpu"),
+        ModelConfig(path="D:/development/HoloCine/checkpoints/Wan2.2-T2V-A14B/umt5-xxl-enc-bf16.safetensors", offload_device="cpu"),
+        ModelConfig(path="D:/development/HoloCine/checkpoints/HoloCine_dit/full/Holocine_full_high_e4m3_fp8.safetensors", offload_device="cpu"),
+        ModelConfig(path="D:/development/HoloCine/checkpoints/HoloCine_dit/full/Holocine_full_low_e4m3_fp8.safetensors",  offload_device="cpu"),
+        ModelConfig(path="D:/development/HoloCine/checkpoints/Wan2.2-T2V-A14B/wan_2.1_vae.safetensors", offload_device="cpu"),
     ],
 )
 pipe.enable_vram_management()
@@ -224,23 +224,23 @@ run_inference(
         "A stylish medium two-shot of them standing together, the swirling party out of focus behind them, as they begin to converse."
 
     ],
-    num_frames=241
+    num_frames=81
 )
 
 
 # --- Example 2: Call using Raw String Input (Choice 2) ---
 # (Uses your original prompt format)
-print("\n--- Running Example 2 (Raw String Input) ---")
-run_inference(
-    pipe=pipe,
-    negative_prompt=scene_negative_prompt,
-    output_path="video2.mp4",
+#print("\n--- Running Example 2 (Raw String Input) ---")
+#run_inference(
+#    pipe=pipe,
+    #negative_prompt=scene_negative_prompt,
+    #output_path="video2.mp4",
     
     # Choice 2 inputs
-    prompt="[global caption] The scene features a young painter, [character1], with paint-smudged cheeks and intense, focused eyes. Her hair is tied up messily. The setting is a bright, sun-drenched art studio with large windows, canvases, and the smell of oil paint. This scene contains 6 shots. [per shot caption] Medium shot of [character1] standing back from a large canvas, brush in hand, critically observing her work. [shot cut] Close-up of her hand holding the brush, dabbing it thoughtfully onto a palette of vibrant colors. [shot cut] Extreme close-up of her eyes, narrowed in concentration as she studies the canvas. [shot cut] Close-up on the canvas, showing a detailed, textured brushstroke being slowly applied. [shot cut] Medium close-up of [character1]'s face, a small, satisfied smile appears as she finds the right color. [shot cut] Over-the-shoulder shot showing her add a final, delicate highlight to the painting.",
-    num_frames=241,  
-    shot_cut_frames=[37, 73, 113, 169, 205]
-)
+    #prompt="[global caption] The scene features a young painter, [character1], with paint-smudged cheeks and intense, focused eyes. Her hair is tied up messily. The setting is a bright, sun-drenched art studio with large windows, canvases, and the smell of oil paint. This scene contains 6 shots. [per shot caption] Medium shot of [character1] standing back from a large canvas, brush in hand, critically observing her work. [shot cut] Close-up of her hand holding the brush, dabbing it thoughtfully onto a palette of vibrant colors. [shot cut] Extreme close-up of her eyes, narrowed in concentration as she studies the canvas. [shot cut] Close-up on the canvas, showing a detailed, textured brushstroke being slowly applied. [shot cut] Medium close-up of [character1]'s face, a small, satisfied smile appears as she finds the right color. [shot cut] Over-the-shoulder shot showing her add a final, delicate highlight to the painting.",
+    #num_frames=241,  
+    #shot_cut_frames=[37, 73, 113, 169, 205]
+#)
 
 
 # # we provide more samples for test, you can uncomment them and have a try.
