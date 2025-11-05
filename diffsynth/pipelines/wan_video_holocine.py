@@ -26,6 +26,15 @@ from ..vram_management import enable_vram_management, AutoWrappedModule, AutoWra
 from ..lora import GeneralLoRALoader
 
 
+@dataclass
+class BlockSwapConfig:
+    offload_device: torch.device
+    offload_dtype: torch.dtype
+    sliding_window_size: int
+    sliding_window_stride: int
+    limit_gb: float
+
+
 
 class WanVideoHoloCinePipeline(BasePipeline):
 
@@ -73,6 +82,77 @@ class WanVideoHoloCinePipeline(BasePipeline):
         lora = load_state_dict(path, torch_dtype=self.torch_dtype, device=self.device)
         loader.load(module, lora, alpha=alpha)
 
+
+    def _estimate_block_swap_window(self, latents: torch.Tensor, conditioning: Optional[torch.Tensor], limit_gb: float) -> int:
+        if latents is None:
+            return 0
+        element_size = latents.element_size()
+        # Estimate per-frame cost for latents
+        per_frame_elements = latents[:, :, :1].numel()
+        per_frame_bytes = per_frame_elements * element_size
+        if conditioning is not None and conditioning.ndim >= 3 and conditioning.shape[2] == latents.shape[2]:
+            per_frame_bytes += conditioning[:, :, :1].numel() * conditioning.element_size()
+        if per_frame_bytes == 0:
+            return latents.shape[2]
+        safety = 0.85
+        available_bytes = max(int(limit_gb * (1024 ** 3) * safety), per_frame_bytes)
+        window = max(1, available_bytes // per_frame_bytes)
+        return window
+
+    def _configure_block_swap(
+        self,
+        inputs_shared: dict,
+        limit_gb: float,
+        window_size: Optional[int],
+        window_stride: Optional[int],
+        offload_device: str,
+        offload_dtype: Optional[torch.dtype],
+    ) -> Optional[BlockSwapConfig]:
+        latents: Optional[torch.Tensor] = inputs_shared.get("latents")
+        if latents is None:
+            warnings.warn("Block swap requested but no latents tensor is available; ignoring request.")
+            return None
+
+        device = torch.device(offload_device)
+        target_dtype = offload_dtype or latents.dtype
+        latents = latents.to(device=device, dtype=target_dtype)
+        inputs_shared["latents"] = latents
+
+        heavy_tensor_keys = [
+            "y",
+            "reference_latents",
+            "vace_context",
+            "control_camera_latents_input",
+            "first_frame_latents",
+        ]
+        for key in heavy_tensor_keys:
+            tensor = inputs_shared.get(key)
+            if tensor is not None and isinstance(tensor, torch.Tensor):
+                inputs_shared[key] = tensor.to(device=device, dtype=target_dtype)
+
+        # Derive default window configuration if not provided
+        estimated_window = self._estimate_block_swap_window(latents, inputs_shared.get("y"), limit_gb)
+        sliding_window_size = window_size or estimated_window
+        sliding_window_size = max(1, min(latents.shape[2], sliding_window_size))
+        if window_stride is None:
+            sliding_window_stride = max(1, sliding_window_size // 2)
+        else:
+            sliding_window_stride = window_stride
+        sliding_window_stride = max(1, min(sliding_window_size, sliding_window_stride))
+
+        print(
+            f"[BlockSwap] Enabled with window={sliding_window_size}, stride={sliding_window_stride}, "
+            f"storage_device={device}, dtype={target_dtype}, limit={limit_gb}GB"
+        )
+
+        return BlockSwapConfig(
+            offload_device=device,
+            offload_dtype=target_dtype,
+            sliding_window_size=sliding_window_size,
+            sliding_window_stride=sliding_window_stride,
+            limit_gb=limit_gb,
+        )
+
         
     def training_loss(self, **inputs):
         max_timestep_boundary = int(inputs.get("max_timestep_boundary", 1) * self.scheduler.num_train_timesteps)
@@ -94,6 +174,21 @@ class WanVideoHoloCinePipeline(BasePipeline):
 
     def enable_vram_management(self, num_persistent_param_in_dit=None, vram_limit=None, vram_buffer=0.5):
         self.vram_management_enabled = True
+        float8_dtypes = {
+            getattr(torch, name)
+            for name in (
+                "float8_e4m3fn",
+                "float8_e4m3fnuz",
+                "float8_e5m2",
+                "float8_e5m2fnuz",
+            )
+            if hasattr(torch, name)
+        }
+
+        def resolve_computation_dtype(param_dtype: torch.dtype) -> torch.dtype:
+            target_dtype = self.torch_dtype if param_dtype in float8_dtypes and self.torch_dtype is not None else param_dtype
+            return target_dtype
+
         if num_persistent_param_in_dit is not None:
             vram_limit = None
         else:
@@ -102,6 +197,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
             vram_limit = vram_limit - vram_buffer
         if self.text_encoder is not None:
             dtype = next(iter(self.text_encoder.parameters())).dtype
+            computation_dtype = resolve_computation_dtype(dtype)
             enable_vram_management(
                 self.text_encoder,
                 module_map = {
@@ -113,9 +209,9 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device="cpu",
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
                 vram_limit=vram_limit,
@@ -123,6 +219,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
         if self.dit is not None:
             dtype = next(iter(self.dit.parameters())).dtype
             device = "cpu" if vram_limit is not None else self.device
+            computation_dtype = resolve_computation_dtype(dtype)
             enable_vram_management(
                 self.dit,
                 module_map = {
@@ -136,18 +233,18 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device=device,
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
                 max_num_param=num_persistent_param_in_dit,
                 overflow_module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device="cpu",
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
                 vram_limit=vram_limit,
@@ -155,6 +252,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
         if self.dit2 is not None:
             dtype = next(iter(self.dit2.parameters())).dtype
             device = "cpu" if vram_limit is not None else self.device
+            computation_dtype = resolve_computation_dtype(dtype)
             enable_vram_management(
                 self.dit2,
                 module_map = {
@@ -167,24 +265,25 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device=device,
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
                 max_num_param=num_persistent_param_in_dit,
                 overflow_module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device="cpu",
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
                 vram_limit=vram_limit,
             )
         if self.vae is not None:
             dtype = next(iter(self.vae.parameters())).dtype
+            computation_dtype = resolve_computation_dtype(dtype)
             enable_vram_management(
                 self.vae,
                 module_map = {
@@ -199,14 +298,15 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device=self.device,
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
             )
         if self.image_encoder is not None:
             dtype = next(iter(self.image_encoder.parameters())).dtype
+            computation_dtype = resolve_computation_dtype(dtype)
             enable_vram_management(
                 self.image_encoder,
                 module_map = {
@@ -217,14 +317,15 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device="cpu",
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
             )
         if self.motion_controller is not None:
             dtype = next(iter(self.motion_controller.parameters())).dtype
+            computation_dtype = resolve_computation_dtype(dtype)
             enable_vram_management(
                 self.motion_controller,
                 module_map = {
@@ -233,15 +334,16 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device="cpu",
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
             )
         if self.vace is not None:
             dtype = next(iter(self.vace.parameters())).dtype
             device = "cpu" if vram_limit is not None else self.device
+            computation_dtype = resolve_computation_dtype(dtype)
             enable_vram_management(
                 self.vace,
                 module_map = {
@@ -253,9 +355,9 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device=device,
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
                 vram_limit=vram_limit,
@@ -412,6 +514,13 @@ class WanVideoHoloCinePipeline(BasePipeline):
         shot_cut_frames: Optional[list[int]] = None,
         shot_mask_type: Optional[Literal["id", "normalized", "alternating"]] = None,
         text_cut_positions: Optional[torch.Tensor] = None,
+        # Block swapping
+        enable_block_swap: bool = False,
+        block_swap_limit_gb: float = 32.0,
+        block_swap_size: Optional[int] = None,
+        block_swap_stride: Optional[int] = None,
+        block_swap_device: str = "cpu",
+        block_swap_dtype: Optional[torch.dtype] = None,
     ):
         # Scheduler
         self.scheduler.set_timesteps(num_inference_steps, denoising_strength=denoising_strength, shift=sigma_shift)
@@ -445,6 +554,33 @@ class WanVideoHoloCinePipeline(BasePipeline):
         for unit in self.units:
             inputs_shared, inputs_posi, inputs_nega = self.unit_runner(unit, self, inputs_shared, inputs_posi, inputs_nega)
 
+        block_swap_config = None
+        if enable_block_swap or block_swap_size is not None or block_swap_stride is not None:
+            block_swap_config = self._configure_block_swap(
+                inputs_shared,
+                limit_gb=block_swap_limit_gb,
+                window_size=block_swap_size,
+                window_stride=block_swap_stride,
+                offload_device=block_swap_device,
+                offload_dtype=block_swap_dtype,
+            )
+            if block_swap_config is not None:
+                if sliding_window_size is None:
+                    sliding_window_size = block_swap_config.sliding_window_size
+                if sliding_window_stride is None:
+                    sliding_window_stride = block_swap_config.sliding_window_stride
+                inputs_shared["computation_device"] = self.device
+                inputs_shared["computation_dtype"] = self.torch_dtype
+                inputs_shared["sliding_window_size"] = sliding_window_size
+                inputs_shared["sliding_window_stride"] = sliding_window_stride
+                for tensor_dict in (inputs_posi, inputs_nega):
+                    tensor = tensor_dict.get("y")
+                    if tensor is not None and isinstance(tensor, torch.Tensor):
+                        tensor_dict["y"] = tensor.to(
+                            device=block_swap_config.offload_device,
+                            dtype=block_swap_config.offload_dtype,
+                        )
+
 
 
         # not use mask for negative
@@ -477,7 +613,12 @@ class WanVideoHoloCinePipeline(BasePipeline):
             inputs_shared["latents"] = self.scheduler.step(noise_pred, self.scheduler.timesteps[progress_id], inputs_shared["latents"])
             if "first_frame_latents" in inputs_shared:
                 inputs_shared["latents"][:, :, 0:1] = inputs_shared["first_frame_latents"]
-        
+            if block_swap_config is not None:
+                inputs_shared["latents"] = inputs_shared["latents"].to(
+                    device=block_swap_config.offload_device,
+                    dtype=block_swap_config.offload_dtype,
+                )
+
         # VACE (TODO: remove it)
         if vace_reference_image is not None:
             inputs_shared["latents"] = inputs_shared["latents"][:, :, 1:]
@@ -996,13 +1137,33 @@ class TemporalTiler_BCTHW:
         mask = repeat(t, "T -> 1 1 T 1 1")
         return mask
     
-    def run(self, model_fn, sliding_window_size, sliding_window_stride, computation_device, computation_dtype, model_kwargs, tensor_names, batch_size=None):
+    def run(
+        self,
+        model_fn,
+        sliding_window_size,
+        sliding_window_stride,
+        computation_device=None,
+        computation_dtype=None,
+        model_kwargs=None,
+        tensor_names=None,
+        batch_size=None,
+    ):
+        if model_kwargs is None:
+            model_kwargs = {}
+        if tensor_names is None:
+            tensor_names = []
         tensor_names = [tensor_name for tensor_name in tensor_names if model_kwargs.get(tensor_name) is not None]
+        if len(tensor_names) == 0:
+            return model_fn(**model_kwargs)
         tensor_dict = {tensor_name: model_kwargs[tensor_name] for tensor_name in tensor_names}
         B, C, T, H, W = tensor_dict[tensor_names[0]].shape
         if batch_size is not None:
             B *= batch_size
         data_device, data_dtype = tensor_dict[tensor_names[0]].device, tensor_dict[tensor_names[0]].dtype
+        if computation_device is None:
+            computation_device = data_device
+        if computation_dtype is None:
+            computation_dtype = data_dtype
         value = torch.zeros((B, C, T, H, W), device=data_device, dtype=data_dtype)
         weight = torch.zeros((1, 1, T, 1, 1), device=data_device, dtype=data_dtype)
         for t in range(0, T, sliding_window_stride):
@@ -1052,6 +1213,8 @@ def model_fn_wan_video(
     shot_indices: Optional[torch.Tensor] = None,
     shot_mask_type: Optional[str] = None,
     text_cut_positions: Optional[torch.Tensor] = None,
+    computation_device: Optional[torch.device] = None,
+    computation_dtype: Optional[torch.dtype] = None,
     **kwargs,
 ):
     if sliding_window_size is not None and sliding_window_stride is not None:
@@ -1076,8 +1239,10 @@ def model_fn_wan_video(
         )
         return TemporalTiler_BCTHW().run(
             model_fn_wan_video,
-            sliding_window_size, sliding_window_stride,
-            latents.device, latents.dtype,
+            sliding_window_size,
+            sliding_window_stride,
+            computation_device=computation_device or timestep.device,
+            computation_dtype=computation_dtype or latents.dtype,
             model_kwargs=model_kwargs,
             tensor_names=["latents", "y"],
             batch_size=2 if cfg_merge else 1
