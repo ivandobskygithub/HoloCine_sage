@@ -115,7 +115,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
                     offload_device="cpu",
                     onload_dtype=dtype,
                     onload_device="cpu",
-                    computation_dtype=self.torch_dtype,
+                    computation_dtype=dtype,
                     computation_device=self.device,
                 ),
                 vram_limit=vram_limit,
@@ -138,7 +138,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
                     offload_device="cpu",
                     onload_dtype=dtype,
                     onload_device=device,
-                    computation_dtype=self.torch_dtype,
+                    computation_dtype=dtype,
                     computation_device=self.device,
                 ),
                 max_num_param=num_persistent_param_in_dit,
@@ -147,7 +147,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
                     offload_device="cpu",
                     onload_dtype=dtype,
                     onload_device="cpu",
-                    computation_dtype=self.torch_dtype,
+                    computation_dtype=dtype,
                     computation_device=self.device,
                 ),
                 vram_limit=vram_limit,
@@ -169,7 +169,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
                     offload_device="cpu",
                     onload_dtype=dtype,
                     onload_device=device,
-                    computation_dtype=self.torch_dtype,
+                    computation_dtype=dtype,
                     computation_device=self.device,
                 ),
                 max_num_param=num_persistent_param_in_dit,
@@ -178,7 +178,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
                     offload_device="cpu",
                     onload_dtype=dtype,
                     onload_device="cpu",
-                    computation_dtype=self.torch_dtype,
+                    computation_dtype=dtype,
                     computation_device=self.device,
                 ),
                 vram_limit=vram_limit,
@@ -201,7 +201,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
                     offload_device="cpu",
                     onload_dtype=dtype,
                     onload_device=self.device,
-                    computation_dtype=self.torch_dtype,
+                    computation_dtype=dtype,
                     computation_device=self.device,
                 ),
             )
@@ -240,6 +240,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 ),
             )
         if self.vace is not None:
+            dtype = next(iter(self.vace.parameters())).dtype
             device = "cpu" if vram_limit is not None else self.device
             enable_vram_management(
                 self.vace,
@@ -254,7 +255,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
                     offload_device="cpu",
                     onload_dtype=dtype,
                     onload_device=device,
-                    computation_dtype=self.torch_dtype,
+                    computation_dtype=dtype,
                     computation_device=self.device,
                 ),
                 vram_limit=vram_limit,
@@ -318,7 +319,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
         if use_usp: pipe.initialize_usp()
         
         # Download and load models
-        model_manager = ModelManager()
+        model_manager = ModelManager(torch_dtype=torch_dtype, device=device)
         for model_config in model_configs:
             model_config.download_if_necessary(use_usp=use_usp)
             model_manager.load_model(

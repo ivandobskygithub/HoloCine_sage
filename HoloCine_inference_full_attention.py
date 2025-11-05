@@ -186,13 +186,29 @@ def run_inference(
 # --- 1. Load Model (Done once) ---
 device = 'cuda'
 pipe = WanVideoHoloCinePipeline.from_pretrained(
-    torch_dtype=torch.float8_e4m3fn,
+    torch_dtype=torch.bfloat16,
     device=device,
     model_configs=[
-        ModelConfig(path="D:/development/HoloCine/checkpoints/Wan2.2-T2V-A14B/umt5-xxl-enc-bf16.safetensors", offload_device="cpu"),
-        ModelConfig(path="D:/development/HoloCine/checkpoints/HoloCine_dit/full/Holocine_full_high_e4m3_fp8.safetensors", offload_device="cpu"),
-        ModelConfig(path="D:/development/HoloCine/checkpoints/HoloCine_dit/full/Holocine_full_low_e4m3_fp8.safetensors",  offload_device="cpu"),
-        ModelConfig(path="D:/development/HoloCine/checkpoints/Wan2.2-T2V-A14B/wan_2.1_vae.safetensors", offload_device="cpu"),
+        ModelConfig(
+            path="D:/development/HoloCine/checkpoints/Wan2.2-T2V-A14B/umt5-xxl-enc-bf16.safetensors",
+            offload_device="cpu",
+            offload_dtype=torch.bfloat16,
+        ),
+        ModelConfig(
+            path="D:/development/HoloCine/checkpoints/HoloCine_dit/full/Holocine_full_high_e4m3_fp8.safetensors",
+            offload_device="cpu",
+            offload_dtype=torch.float8_e4m3fn,
+        ),
+        ModelConfig(
+            path="D:/development/HoloCine/checkpoints/HoloCine_dit/full/Holocine_full_low_e4m3_fp8.safetensors",
+            offload_device="cpu",
+            offload_dtype=torch.float8_e4m3fn,
+        ),
+        ModelConfig(
+            path="D:/development/HoloCine/checkpoints/Wan2.2-T2V-A14B/wan_2.1_vae.safetensors",
+            offload_device="cpu",
+            offload_dtype=torch.float16,
+        ),
     ],
 )
 pipe.enable_vram_management()
