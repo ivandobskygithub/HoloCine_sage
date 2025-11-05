@@ -166,11 +166,6 @@ def attention_per_batch_with_shots(
     outputs = []
 
     flash_attn_varlen_func = get_varlen_attention_func()
-    if flash_attn_varlen_func is None:
-        raise AttentionBackendError(
-            "Variable-length attention requires FlashAttention v2/v3. "
-            "Select one of those backends or disable shot_latent_indices."
-        )
 
     for bi in range(b):
 
@@ -185,49 +180,75 @@ def attention_per_batch_with_shots(
             V_shots.append(v[bi, :, a:bnd, :])
             N_list.append(bnd - a)
 
-
         Q_locals = [rearrange(Qi, "n s d -> s n d") for Qi in Q_shots]
         K_locals = [rearrange(Ki, "n s d -> s n d") for Ki in K_shots]
         V_locals = [rearrange(Vi, "n s d -> s n d") for Vi in V_shots]
 
-
         K_global, V_global = build_global_reps_from_shots(K_locals, V_locals, per_g, mode="firstk")
 
-        K_list = [torch.cat([K_locals[i], K_global], dim=0) for i in range(len(K_locals))]
-        V_list = [torch.cat([V_locals[i], V_global], dim=0) for i in range(len(V_locals))]
-        kv_lengths = [Ni + K_global.size(0) for Ni in N_list]
+        if flash_attn_varlen_func is None:
+            K_global_n = rearrange(K_global, "s n d -> n s d") if K_global.numel() > 0 else None
+            V_global_n = rearrange(V_global, "s n d -> n s d") if V_global.numel() > 0 else None
 
-        Q_packed = torch.cat(Q_locals, dim=0)  # [sum_N, n, d]
-        K_packed = torch.cat(K_list,   dim=0)  # [sum_(N+G), n, d]
-        V_packed = torch.cat(V_list,   dim=0)  # [sum_(N+G), n, d]
+            shot_outputs = []
+            dropout = dropout_p if dropout_p > 0 else 0.0
+            for Qi, Ki, Vi in zip(Q_shots, K_shots, V_shots):
+                q_shot = Qi.unsqueeze(0)
+                k_shot = Ki
+                v_shot = Vi
+                if K_global_n is not None:
+                    k_shot = torch.cat([k_shot, K_global_n], dim=1)
+                if V_global_n is not None:
+                    v_shot = torch.cat([v_shot, V_global_n], dim=1)
 
-        Sshots = len(N_list)
-        q_seqlens = torch.tensor([0] + [sum(N_list[:i+1]) for i in range(Sshots)],
-                                 device=device, dtype=torch.int32)
-        kv_seqlens = torch.tensor([0] + [sum(kv_lengths[:i+1]) for i in range(Sshots)],
-                                  device=device, dtype=torch.int32)
-        max_q_seqlen = max(N_list) if len(N_list) > 0 else 0
-        max_kv_seqlen = max(kv_lengths) if len(kv_lengths) > 0 else 0
+                k_shot = k_shot.unsqueeze(0)
+                v_shot = v_shot.unsqueeze(0)
 
-        
-        O_packed = flash_attn_varlen_func(
-            Q_packed, K_packed, V_packed,
-            q_seqlens, kv_seqlens,
-            max_q_seqlen, max_kv_seqlen,
-            softmax_scale=None, causal=causal
-        )  # [sum_N, n, d]
+                attn_out = F.scaled_dot_product_attention(
+                    q_shot,
+                    k_shot,
+                    v_shot,
+                    dropout_p=dropout,
+                    is_causal=causal,
+                )
 
+                shot_outputs.append(attn_out.squeeze(0))
 
-        O_list = []
-        for i in range(Sshots):
-            st = q_seqlens[i].item()
-            ed = q_seqlens[i+1].item()
-            Oi = O_packed[st:ed]            # [Ni, n, d]
-            O_list.append(Oi)
-        O_local = torch.cat(O_list, dim=0)   # [s_tot, n, d]
-        O_local = rearrange(O_local, "s n d -> n s d").contiguous()  # [n, s, d]
+            O_local = torch.cat(shot_outputs, dim=1).contiguous()
+        else:
+            K_list = [torch.cat([K_locals[i], K_global], dim=0) for i in range(len(K_locals))]
+            V_list = [torch.cat([V_locals[i], V_global], dim=0) for i in range(len(V_locals))]
+            kv_lengths = [Ni + K_global.size(0) for Ni in N_list]
+
+            Q_packed = torch.cat(Q_locals, dim=0)  # [sum_N, n, d]
+            K_packed = torch.cat(K_list,   dim=0)  # [sum_(N+G), n, d]
+            V_packed = torch.cat(V_list,   dim=0)  # [sum_(N+G), n, d]
+
+            Sshots = len(N_list)
+            q_seqlens = torch.tensor([0] + [sum(N_list[:i+1]) for i in range(Sshots)],
+                                     device=device, dtype=torch.int32)
+            kv_seqlens = torch.tensor([0] + [sum(kv_lengths[:i+1]) for i in range(Sshots)],
+                                      device=device, dtype=torch.int32)
+            max_q_seqlen = max(N_list) if len(N_list) > 0 else 0
+            max_kv_seqlen = max(kv_lengths) if len(kv_lengths) > 0 else 0
+
+            O_packed = flash_attn_varlen_func(
+                Q_packed, K_packed, V_packed,
+                q_seqlens, kv_seqlens,
+                max_q_seqlen, max_kv_seqlen,
+                softmax_scale=None, causal=causal
+            )  # [sum_N, n, d]
+
+            O_list = []
+            for i in range(Sshots):
+                st = q_seqlens[i].item()
+                ed = q_seqlens[i+1].item()
+                Oi = O_packed[st:ed]            # [Ni, n, d]
+                O_list.append(Oi)
+            O_local = torch.cat(O_list, dim=0)   # [s_tot, n, d]
+            O_local = rearrange(O_local, "s n d -> n s d").contiguous()  # [n, s, d]
+
         outputs.append(O_local)
-
 
     x = torch.stack(outputs, dim=0)                   # [b, n, s, d]
     x = rearrange(x, "b n s d -> b s (n d)")
