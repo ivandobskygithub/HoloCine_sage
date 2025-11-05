@@ -174,6 +174,21 @@ class WanVideoHoloCinePipeline(BasePipeline):
 
     def enable_vram_management(self, num_persistent_param_in_dit=None, vram_limit=None, vram_buffer=0.5):
         self.vram_management_enabled = True
+        float8_dtypes = {
+            getattr(torch, name)
+            for name in (
+                "float8_e4m3fn",
+                "float8_e4m3fnuz",
+                "float8_e5m2",
+                "float8_e5m2fnuz",
+            )
+            if hasattr(torch, name)
+        }
+
+        def resolve_computation_dtype(param_dtype: torch.dtype) -> torch.dtype:
+            target_dtype = self.torch_dtype if param_dtype in float8_dtypes and self.torch_dtype is not None else param_dtype
+            return target_dtype
+
         if num_persistent_param_in_dit is not None:
             vram_limit = None
         else:
@@ -182,6 +197,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
             vram_limit = vram_limit - vram_buffer
         if self.text_encoder is not None:
             dtype = next(iter(self.text_encoder.parameters())).dtype
+            computation_dtype = resolve_computation_dtype(dtype)
             enable_vram_management(
                 self.text_encoder,
                 module_map = {
@@ -193,9 +209,9 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device="cpu",
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
                 vram_limit=vram_limit,
@@ -203,6 +219,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
         if self.dit is not None:
             dtype = next(iter(self.dit.parameters())).dtype
             device = "cpu" if vram_limit is not None else self.device
+            computation_dtype = resolve_computation_dtype(dtype)
             enable_vram_management(
                 self.dit,
                 module_map = {
@@ -216,18 +233,18 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device=device,
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
                 max_num_param=num_persistent_param_in_dit,
                 overflow_module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device="cpu",
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
                 vram_limit=vram_limit,
@@ -235,6 +252,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
         if self.dit2 is not None:
             dtype = next(iter(self.dit2.parameters())).dtype
             device = "cpu" if vram_limit is not None else self.device
+            computation_dtype = resolve_computation_dtype(dtype)
             enable_vram_management(
                 self.dit2,
                 module_map = {
@@ -247,24 +265,25 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device=device,
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
                 max_num_param=num_persistent_param_in_dit,
                 overflow_module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device="cpu",
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
                 vram_limit=vram_limit,
             )
         if self.vae is not None:
             dtype = next(iter(self.vae.parameters())).dtype
+            computation_dtype = resolve_computation_dtype(dtype)
             enable_vram_management(
                 self.vae,
                 module_map = {
@@ -279,14 +298,15 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device=self.device,
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
             )
         if self.image_encoder is not None:
             dtype = next(iter(self.image_encoder.parameters())).dtype
+            computation_dtype = resolve_computation_dtype(dtype)
             enable_vram_management(
                 self.image_encoder,
                 module_map = {
@@ -297,14 +317,15 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device="cpu",
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
             )
         if self.motion_controller is not None:
             dtype = next(iter(self.motion_controller.parameters())).dtype
+            computation_dtype = resolve_computation_dtype(dtype)
             enable_vram_management(
                 self.motion_controller,
                 module_map = {
@@ -313,15 +334,16 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device="cpu",
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
             )
         if self.vace is not None:
             dtype = next(iter(self.vace.parameters())).dtype
             device = "cpu" if vram_limit is not None else self.device
+            computation_dtype = resolve_computation_dtype(dtype)
             enable_vram_management(
                 self.vace,
                 module_map = {
@@ -333,9 +355,9 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 module_config = dict(
                     offload_dtype=dtype,
                     offload_device="cpu",
-                    onload_dtype=dtype,
+                    onload_dtype=computation_dtype,
                     onload_device=device,
-                    computation_dtype=dtype,
+                    computation_dtype=computation_dtype,
                     computation_device=self.device,
                 ),
                 vram_limit=vram_limit,
