@@ -10,6 +10,7 @@ from diffsynth.pipelines.wan_video_holocine import (
     TemporalTiler_BCTHW,
     WanVideoHoloCinePipeline,
 )
+from diffsynth.schedulers.flow_match import FlowMatchScheduler
 from diffsynth.vram_management.layers import AutoWrappedLinear
 
 
@@ -96,3 +97,23 @@ def test_pipeline_can_opt_in_to_fp8_runtime(monkeypatch):
     assert pipe.computation_dtype == torch.float8_e4m3fn
 
     monkeypatch.delenv("HOLOCINE_ENABLE_FP8_COMPUTE")
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 not supported")
+def test_flow_match_scheduler_handles_fp8_latents_without_promotion_errors():
+    scheduler = FlowMatchScheduler(num_inference_steps=4)
+    scheduler.set_timesteps(4)
+
+    sample = torch.zeros((2, 3), dtype=torch.float8_e4m3fn)
+    model_output = torch.ones((2, 3), dtype=torch.bfloat16)
+    timestep = scheduler.timesteps[0]
+
+    prev_sample = scheduler.step(model_output, timestep, sample)
+
+    assert prev_sample.dtype == torch.float8_e4m3fn
+
+    sigma = scheduler.sigmas[0]
+    sigma_next = scheduler.sigmas[1]
+    expected = sample.to(torch.float32) + model_output.to(torch.float32) * (sigma_next - sigma)
+
+    assert torch.allclose(prev_sample.to(torch.float32), expected, atol=1e-2, rtol=1e-2)
