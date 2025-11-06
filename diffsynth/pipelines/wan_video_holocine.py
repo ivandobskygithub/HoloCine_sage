@@ -869,14 +869,19 @@ class WanVideoHoloCinePipeline(BasePipeline):
             if "first_frame_latents" in inputs_shared:
                 inputs_shared["latents"][:, :, 0:1] = inputs_shared["first_frame_latents"]
             if block_swap_config is not None:
-                logger.debug(
-                    "[BlockSwap] Iteration %d/%d complete, preparing to offload latents",
-                    progress_id + 1,
-                    num_progress_steps,
-                )
-                inputs_shared["latents"] = inputs_shared["latents"].to(
+                latents_tensor = inputs_shared["latents"].to(
                     device=block_swap_config.offload_device,
                     dtype=block_swap_config.offload_dtype,
+                )
+                inputs_shared["latents"] = latents_tensor
+                latent_bytes = latents_tensor.numel() * latents_tensor.element_size()
+                logger.info(
+                    "[BlockSwap] Iteration %d/%d offloaded latents to %s (%s) size≈%.2fGB",
+                    progress_id + 1,
+                    num_progress_steps,
+                    block_swap_config.offload_device,
+                    block_swap_config.offload_dtype,
+                    latent_bytes / (1024 ** 3),
                 )
                 self._log_gpu_memory_state(
                     f"[BlockSwap] After iteration {progress_id + 1}/{num_progress_steps}",
@@ -1383,11 +1388,20 @@ class TemporalTiler_BCTHW:
     def __init__(self):
         pass
 
+    @staticmethod
+    def _estimate_total_windows(total_frames: int, window_size: int, stride: int) -> int:
+        return max(1, math.ceil(max(0, total_frames - window_size) / max(1, stride)) + 1)
+
+    @staticmethod
+    def _is_oom_error(error: RuntimeError) -> bool:
+        message = str(error).lower()
+        return "out of memory" in message or "cuda error" in message
+
     def build_1d_mask(self, length, left_bound, right_bound, border_width):
         x = torch.ones((length,))
         if border_width == 0:
             return x
-        
+
         shift = 0.5
         if not left_bound:
             x[:border_width] = (torch.arange(border_width) + shift) / border_width
@@ -1420,6 +1434,7 @@ class TemporalTiler_BCTHW:
         if len(tensor_names) == 0:
             return model_fn(**model_kwargs)
         tensor_dict = {tensor_name: model_kwargs[tensor_name] for tensor_name in tensor_names}
+        static_kwargs = {key: value for key, value in model_kwargs.items() if key not in tensor_names}
         B, C, T, H, W = tensor_dict[tensor_names[0]].shape
         if batch_size is not None:
             B *= batch_size
@@ -1428,72 +1443,138 @@ class TemporalTiler_BCTHW:
             computation_device = data_device
         if computation_dtype is None:
             computation_dtype = data_dtype
+
+        def slice_time_dimension(tensor: torch.Tensor) -> torch.Tensor:
+            if tensor.shape == ():
+                return tensor
+            target_length = T
+            for dim, size in enumerate(tensor.shape):
+                if size == target_length:
+                    indexer = [slice(None)] * tensor.ndim
+                    indexer[dim] = slice(t, t_end)
+                    return tensor[tuple(indexer)]
+            indexer = [slice(None)] * tensor.ndim
+            dim = 2 if tensor.ndim > 2 else tensor.ndim - 1
+            indexer[dim] = slice(t, t_end)
+            return tensor[tuple(indexer)]
         value = torch.zeros((B, C, T, H, W), device=data_device, dtype=data_dtype)
         weight = torch.zeros((1, 1, T, 1, 1), device=data_device, dtype=data_dtype)
-        total_windows = max(1, math.ceil(max(0, T - sliding_window_size) / max(1, sliding_window_stride)) + 1)
+        current_window_size = sliding_window_size
+        current_stride = max(1, min(sliding_window_stride, current_window_size))
+        total_windows = self._estimate_total_windows(T, current_window_size, current_stride)
         logger.info(
             "[BlockSwap] Sliding window execution: windows=%d, size=%d, stride=%d, tensors=%s",
             total_windows,
-            sliding_window_size,
-            sliding_window_stride,
+            current_window_size,
+            current_stride,
             ",".join(tensor_names),
         )
         window_index = 0
-        for t in range(0, T, sliding_window_stride):
-            if t - sliding_window_stride >= 0 and t - sliding_window_stride + sliding_window_size >= T:
-                continue
-            t_ = min(t + sliding_window_size, T)
-            window_index += 1
+        min_window_size_used = current_window_size
+        max_window_size_used = current_window_size
+        t = 0
+        while t < T:
+            window_size = min(current_window_size, T - t)
+            t_end = t + window_size
             updated_tensors = {}
+            window_total_bytes = 0
             for tensor_name in tensor_names:
-                tensor_slice = tensor_dict[tensor_name][:, :, t:t_, :]
-                updated_tensors[tensor_name] = tensor_slice.to(device=computation_device, dtype=computation_dtype)
-            model_kwargs.update(updated_tensors)
+                tensor_slice = slice_time_dimension(tensor_dict[tensor_name])
+                updated_tensor = tensor_slice.to(device=computation_device, dtype=computation_dtype)
+                updated_tensors[tensor_name] = updated_tensor
+                window_total_bytes += updated_tensor.numel() * updated_tensor.element_size()
             if isinstance(computation_device, torch.device) and computation_device.type == "cuda" and torch.cuda.is_available():
                 try:
                     free_bytes, total_bytes = torch.cuda.mem_get_info(computation_device)
                     allocated_bytes = torch.cuda.memory_allocated(computation_device)
                     snapshot = GPUMemorySnapshot(total_bytes=total_bytes, free_bytes=free_bytes, allocated_bytes=allocated_bytes)
-                    logger.debug(
-                        "[BlockSwap] Window %d/%d frames[%d:%d) on %s (%s) | free≈%.2fGB allocated≈%.2fGB",
-                        window_index,
+                    logger.info(
+                        "[BlockSwap] Swapping window %d/%d frames[%d:%d) size=%d (≈%.2fGB) -> %s (%s) | free≈%.2fGB allocated≈%.2fGB",
+                        window_index + 1,
                         total_windows,
                         t,
-                        t_,
+                        t_end,
+                        window_size,
+                        window_total_bytes / (1024 ** 3),
                         computation_device,
                         computation_dtype,
                         snapshot.free_gb,
                         snapshot.allocated_gb,
                     )
                 except RuntimeError:
-                    logger.debug(
-                        "[BlockSwap] Window %d/%d frames[%d:%d) GPU stats unavailable",
-                        window_index,
+                    logger.info(
+                        "[BlockSwap] Swapping window %d/%d frames[%d:%d) size=%d (≈%.2fGB) -> %s (%s) | GPU stats unavailable",
+                        window_index + 1,
                         total_windows,
                         t,
-                        t_,
+                        t_end,
+                        window_size,
+                        window_total_bytes / (1024 ** 3),
+                        computation_device,
+                        computation_dtype,
                     )
             else:
-                logger.debug(
-                    "[BlockSwap] Window %d/%d frames[%d:%d) on %s (%s)",
-                    window_index,
+                logger.info(
+                    "[BlockSwap] Swapping window %d/%d frames[%d:%d) size=%d (≈%.2fGB) -> %s (%s)",
+                    window_index + 1,
                     total_windows,
                     t,
-                    t_,
+                    t_end,
+                    window_size,
+                    window_total_bytes / (1024 ** 3),
                     computation_device,
                     computation_dtype,
                 )
-            model_output = model_fn(**model_kwargs).to(device=data_device, dtype=data_dtype)
+            try:
+                call_kwargs = dict(static_kwargs)
+                call_kwargs.update(updated_tensors)
+                model_output = model_fn(**call_kwargs).to(device=data_device, dtype=data_dtype)
+            except RuntimeError as error:
+                if not self._is_oom_error(error) or current_window_size == 1:
+                    raise
+                new_window_size = max(1, current_window_size // 2)
+                if new_window_size == current_window_size:
+                    raise
+                logger.warning(
+                    "[BlockSwap] OOM detected for window frames[%d:%d); reducing window size from %d to %d",
+                    t,
+                    t_end,
+                    current_window_size,
+                    new_window_size,
+                )
+                current_window_size = new_window_size
+                current_stride = max(1, min(sliding_window_stride, current_window_size))
+                total_windows = self._estimate_total_windows(T, current_window_size, current_stride)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                logger.info(
+                    "[BlockSwap] Updated sliding window parameters: windows=%d, size=%d, stride=%d",
+                    total_windows,
+                    current_window_size,
+                    current_stride,
+                )
+                del updated_tensors
+                continue
+            border_width = max(0, current_window_size - current_stride)
             mask = self.build_mask(
                 model_output,
-                is_bound=(t == 0, t_ == T),
-                border_width=(sliding_window_size - sliding_window_stride,)
+                is_bound=(t == 0, t_end == T),
+                border_width=(border_width,)
             ).to(device=data_device, dtype=data_dtype)
-            value[:, :, t: t_, :, :] += model_output * mask
-            weight[:, :, t: t_, :, :] += mask
-        logger.info("[BlockSwap] Sliding window execution complete: processed %d windows", window_index)
+            value[:, :, t:t_end, :, :] += model_output * mask
+            weight[:, :, t:t_end, :, :] += mask
+            del updated_tensors
+            window_index += 1
+            min_window_size_used = min(min_window_size_used, window_size)
+            max_window_size_used = max(max_window_size_used, window_size)
+            t += current_stride
+        logger.info(
+            "[BlockSwap] Sliding window execution complete: processed %d windows (window_size range=%d-%d)",
+            window_index,
+            min_window_size_used,
+            max_window_size_used,
+        )
         value /= weight
-        model_kwargs.update(tensor_dict)
         return value
 
 
