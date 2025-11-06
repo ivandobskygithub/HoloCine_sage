@@ -1525,6 +1525,19 @@ class TemporalTiler_BCTHW:
     def _warning(self, message: str) -> None:
         self._log(logging.WARNING, message)
 
+    def _get_gpu_memory_snapshot(
+        self, device: Optional[Union[str, torch.device]] = None
+    ) -> Optional[GPUMemorySnapshot]:
+        if self._gpu_memory_snapshot_fn is None:
+            return None
+        try:
+            if device is not None:
+                return self._gpu_memory_snapshot_fn(device)
+            return self._gpu_memory_snapshot_fn()
+        except TypeError:
+            # Fallback for callables that ignore the device parameter
+            return self._gpu_memory_snapshot_fn()
+
     @staticmethod
     def _estimate_total_windows(total_frames: int, window_size: int, stride: int) -> int:
         return max(1, math.ceil(max(0, total_frames - window_size) / max(1, stride)) + 1)
