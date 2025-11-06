@@ -21,18 +21,35 @@ def test_pipeline_uses_distinct_computation_dtype_for_float8_storage():
     assert pipe.computation_dtype != torch.float8_e4m3fn
 
 
+def _preferred_float8_dtype():
+    for name in ("float8_e4m3fn", "float8_e4m3fnuz", "float8_e5m2", "float8_e5m2fnuz"):
+        if hasattr(torch, name):
+            return getattr(torch, name)
+    return None
+
+
 def test_pipeline_tracks_latent_storage_dtype_defaults():
     pipe = WanVideoHoloCinePipeline(device="cpu", torch_dtype=torch.float16)
-    assert pipe.latent_storage_dtype == torch.float16
+    preferred_fp8 = _preferred_float8_dtype()
+    if preferred_fp8 is not None:
+        assert pipe.latent_storage_dtype == preferred_fp8
+    else:
+        assert pipe.latent_storage_dtype == torch.float16
 
     pipe.to(dtype=torch.float32)
-    assert pipe.latent_storage_dtype == torch.float32
+    if preferred_fp8 is not None:
+        assert pipe.latent_storage_dtype == preferred_fp8
+    else:
+        assert pipe.latent_storage_dtype == torch.float32
 
     pipe.set_latent_storage_dtype(torch.float16)
     assert pipe.latent_storage_dtype == torch.float16
 
     pipe.set_latent_storage_dtype(None)
-    assert pipe.latent_storage_dtype == pipe.torch_dtype
+    if preferred_fp8 is not None:
+        assert pipe.latent_storage_dtype == preferred_fp8
+    else:
+        assert pipe.latent_storage_dtype == pipe.torch_dtype
 
 
 def test_pipeline_respects_explicit_computation_dtype():
@@ -112,6 +129,20 @@ def test_temporal_tiler_accumulates_in_runtime_dtype_before_downcasting():
     assert output.dtype == torch.float8_e4m3fn
     assert output.device == latents.device
     assert torch.allclose(output.to(dtype=torch.float16), torch.ones_like(latents, dtype=torch.float16))
+
+
+def test_pipeline_can_disable_default_fp8_storage(monkeypatch):
+    monkeypatch.setenv("HOLOCINE_DISABLE_FP8_STORAGE", "1")
+
+    pipe = WanVideoHoloCinePipeline(device="cpu", torch_dtype=torch.float16)
+
+    assert pipe.latent_storage_dtype == torch.float16
+
+    pipe.to(dtype=torch.float32)
+    assert pipe.latent_storage_dtype == torch.float32
+
+    pipe.set_latent_storage_dtype(None)
+    assert pipe.latent_storage_dtype == pipe.torch_dtype
 
 
 def test_pipeline_can_opt_in_to_fp8_runtime(monkeypatch):

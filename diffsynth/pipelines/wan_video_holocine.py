@@ -31,16 +31,18 @@ from ..vram_management import enable_vram_management, AutoWrappedModule, AutoWra
 from ..lora import GeneralLoRALoader
 
 
-FLOAT8_STORAGE_DTYPES = {
-    getattr(torch, name)
-    for name in (
-        "float8_e4m3fn",
-        "float8_e4m3fnuz",
-        "float8_e5m2",
-        "float8_e5m2fnuz",
-    )
-    if hasattr(torch, name)
-}
+FLOAT8_STORAGE_DTYPE_NAMES = (
+    "float8_e4m3fn",
+    "float8_e4m3fnuz",
+    "float8_e5m2",
+    "float8_e5m2fnuz",
+)
+
+FLOAT8_STORAGE_DTYPE_CANDIDATES = tuple(
+    getattr(torch, name) for name in FLOAT8_STORAGE_DTYPE_NAMES if hasattr(torch, name)
+)
+
+FLOAT8_STORAGE_DTYPES = set(FLOAT8_STORAGE_DTYPE_CANDIDATES)
 
 
 BLOCK_SWAP_LOGGER_NAME = "holocine.blockswap"
@@ -164,7 +166,11 @@ class WanVideoHoloCinePipeline(BasePipeline):
             computation_dtype if self._computation_dtype_explicit else self._default_computation_dtype(self.torch_dtype)
         )
         self._latent_storage_dtype_explicit = latent_storage_dtype is not None
-        self.latent_storage_dtype = latent_storage_dtype if self._latent_storage_dtype_explicit else self.torch_dtype
+        self.latent_storage_dtype = (
+            latent_storage_dtype
+            if self._latent_storage_dtype_explicit
+            else self._default_latent_storage_dtype(self.torch_dtype)
+        )
         self.model_names = [
             "text_encoder",
             "image_encoder",
@@ -265,6 +271,30 @@ class WanVideoHoloCinePipeline(BasePipeline):
         allow_fp8 = getattr(matmul_backend, "allow_fp8", True) if matmul_backend is not None else True
         return bool(allow_fp8)
 
+    @staticmethod
+    def _float8_storage_disabled() -> bool:
+        flag = os.getenv("HOLOCINE_DISABLE_FP8_STORAGE")
+        if flag is None:
+            return False
+        flag = flag.strip().lower()
+        return flag in {"1", "true", "yes", "on", "enable", "enabled"}
+
+    @staticmethod
+    def _preferred_float8_storage_dtype() -> Optional[torch.dtype]:
+        for dtype in FLOAT8_STORAGE_DTYPE_CANDIDATES:
+            return dtype
+        return None
+
+    def _default_latent_storage_dtype(self, storage_dtype: Optional[torch.dtype]) -> Optional[torch.dtype]:
+        if storage_dtype in FLOAT8_STORAGE_DTYPES:
+            return storage_dtype
+        if self._float8_storage_disabled():
+            return storage_dtype
+        preferred = self._preferred_float8_storage_dtype()
+        if preferred is not None:
+            return preferred
+        return storage_dtype
+
     def _default_computation_dtype(self, storage_dtype: Optional[torch.dtype]) -> Optional[torch.dtype]:
         if storage_dtype in FLOAT8_STORAGE_DTYPES:
             if self._fp8_compute_requested() and self._is_fp8_compute_supported():
@@ -293,12 +323,14 @@ class WanVideoHoloCinePipeline(BasePipeline):
         if not self._computation_dtype_explicit:
             self.computation_dtype = self._default_computation_dtype(self.torch_dtype)
         if not getattr(self, "_latent_storage_dtype_explicit", False):
-            self.latent_storage_dtype = self.torch_dtype
+            self.latent_storage_dtype = self._default_latent_storage_dtype(self.torch_dtype)
         return self
 
     def set_latent_storage_dtype(self, dtype: Optional[torch.dtype]) -> None:
         self._latent_storage_dtype_explicit = dtype is not None
-        self.latent_storage_dtype = dtype if self._latent_storage_dtype_explicit else self.torch_dtype
+        self.latent_storage_dtype = (
+            dtype if self._latent_storage_dtype_explicit else self._default_latent_storage_dtype(self.torch_dtype)
+        )
 
     def _cast_to_latent_storage(
         self,
