@@ -98,6 +98,7 @@ def run_inference(
     block_swap_stride: Optional[int] = None,
     block_swap_device: str = "cpu",
     block_swap_dtype: Optional[torch.dtype] = None,
+    block_swap_prefer_model_offload: bool = True,
     
     # --- Output Parameters ---
     fps: int = 15,
@@ -127,6 +128,7 @@ def run_inference(
         "block_swap_stride": block_swap_stride,
         "block_swap_device": block_swap_device,
         "block_swap_dtype": block_swap_dtype,
+        "block_swap_prefer_model_offload": block_swap_prefer_model_offload,
     }
 
     if pipe_kwargs["block_swap_dtype"] is None and hasattr(pipe, "torch_dtype"):
