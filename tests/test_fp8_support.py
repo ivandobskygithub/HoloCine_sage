@@ -73,8 +73,35 @@ def test_temporal_tiler_accumulates_in_runtime_dtype_before_downcasting():
         computation_dtype=torch.float16,
         model_kwargs={"latents": latents},
         tensor_names=["latents"],
+        return_to_storage=True,
     )
 
     assert output.dtype == torch.float8_e4m3fn
     assert output.device == latents.device
     assert torch.allclose(output.to(dtype=torch.float16), torch.ones_like(latents, dtype=torch.float16))
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 not supported")
+def test_temporal_tiler_can_preserve_computation_dtype_when_requested():
+    latents = torch.zeros((1, 2, 4, 3, 3), dtype=torch.float8_e4m3fn)
+
+    tiler = TemporalTiler_BCTHW()
+
+    def model_fn(latents):
+        assert latents.dtype == torch.float16
+        return torch.ones_like(latents, dtype=torch.float16)
+
+    output = tiler.run(
+        model_fn,
+        sliding_window_size=2,
+        sliding_window_stride=2,
+        computation_device="cpu",
+        computation_dtype=torch.float16,
+        model_kwargs={"latents": latents},
+        tensor_names=["latents"],
+        return_to_storage=False,
+    )
+
+    assert output.dtype == torch.float16
+    assert output.device.type == "cpu"
+    assert torch.allclose(output, torch.ones_like(output))

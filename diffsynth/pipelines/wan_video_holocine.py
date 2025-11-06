@@ -1756,6 +1756,7 @@ class TemporalTiler_BCTHW:
         model_kwargs=None,
         tensor_names=None,
         batch_size=None,
+        return_to_storage=True,
     ):
         if model_kwargs is None:
             model_kwargs = {}
@@ -1930,10 +1931,11 @@ class TemporalTiler_BCTHW:
             )
         )
         value /= weight
-        storage_device_cmp = torch.device(storage_device) if isinstance(storage_device, str) else storage_device
-        value_device_cmp = torch.device(value_device) if isinstance(value_device, str) else value_device
-        if value_device_cmp != storage_device_cmp or value_dtype != storage_dtype:
-            value = value.to(device=storage_device, dtype=storage_dtype)
+        if return_to_storage:
+            storage_device_cmp = torch.device(storage_device) if isinstance(storage_device, str) else storage_device
+            value_device_cmp = torch.device(value_device) if isinstance(value_device, str) else value_device
+            if value_device_cmp != storage_device_cmp or value_dtype != storage_dtype:
+                value = value.to(device=storage_device, dtype=storage_dtype)
         return value
 
 
@@ -2008,7 +2010,8 @@ def model_fn_wan_video(
             computation_dtype=computation_dtype or latents.dtype,
             model_kwargs=model_kwargs,
             tensor_names=["latents", "y"],
-            batch_size=2 if cfg_merge else 1
+            batch_size=2 if cfg_merge else 1,
+            return_to_storage=False,
         )
     
     target_device = computation_device or (latents.device if latents is not None else None)
