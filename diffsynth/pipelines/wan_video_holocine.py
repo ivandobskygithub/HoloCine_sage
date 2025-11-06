@@ -1525,6 +1525,19 @@ class TemporalTiler_BCTHW:
     def _warning(self, message: str) -> None:
         self._log(logging.WARNING, message)
 
+    def _get_gpu_memory_snapshot(
+        self, device: Optional[Union[str, torch.device]] = None
+    ) -> Optional[GPUMemorySnapshot]:
+        if self._gpu_memory_snapshot_fn is None:
+            return None
+        try:
+            if device is not None:
+                return self._gpu_memory_snapshot_fn(device)
+            return self._gpu_memory_snapshot_fn()
+        except TypeError:
+            # Fallback for callables that ignore the device parameter
+            return self._gpu_memory_snapshot_fn()
+
     @staticmethod
     def _estimate_total_windows(total_frames: int, window_size: int, stride: int) -> int:
         return max(1, math.ceil(max(0, total_frames - window_size) / max(1, stride)) + 1)
@@ -2036,8 +2049,33 @@ def model_fn_wan_video(
 
 
     use_sparse_self_attn = getattr(dit, 'use_sparse_self_attn', False)
-    if use_sparse_self_attn:
-        shot_latent_indices = shot_indices.repeat_interleave(h * w, dim=1)
+    if use_sparse_self_attn and shot_indices is not None:
+        shot_indices_for_cuts = shot_indices
+        if shot_indices_for_cuts.dim() == 1:
+            shot_indices_for_cuts = shot_indices_for_cuts.unsqueeze(0)
+        if reference_latents is not None:
+            ref_token_count = reference_latents.shape[1]
+            tokens_per_frame = h * w
+            if tokens_per_frame > 0 and ref_token_count > 0:
+                ref_frames, remainder = divmod(ref_token_count, tokens_per_frame)
+                if remainder != 0:
+                    if logger is not None:
+                        logger.warning(
+                            "Reference latents token count (%s) is not a multiple of tokens per frame (%s); "
+                            "ignoring reference tokens for sparse attention grouping.",
+                            ref_token_count,
+                            tokens_per_frame,
+                        )
+                elif ref_frames > 0:
+                    max_shot_ids = shot_indices_for_cuts.amax(dim=1, keepdim=True)
+                    ref_offsets = torch.arange(
+                        ref_frames,
+                        device=shot_indices_for_cuts.device,
+                        dtype=shot_indices_for_cuts.dtype,
+                    ).unsqueeze(0)
+                    ref_labels = max_shot_ids + 1 + ref_offsets
+                    shot_indices_for_cuts = torch.cat([ref_labels, shot_indices_for_cuts], dim=1)
+        shot_latent_indices = shot_indices_for_cuts.repeat_interleave(h * w, dim=1)
         shot_latent_indices = labels_to_cuts(shot_latent_indices)
     else:
         shot_latent_indices = None
