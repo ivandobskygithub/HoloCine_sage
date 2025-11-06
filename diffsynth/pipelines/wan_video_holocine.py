@@ -226,8 +226,46 @@ class WanVideoHoloCinePipeline(BasePipeline):
             ),
         )
 
+    def _fp8_compute_requested(self) -> bool:
+        flag = os.getenv("HOLOCINE_ENABLE_FP8_COMPUTE")
+        if flag is None:
+            return False
+        flag = flag.strip().lower()
+        return flag in {"1", "true", "yes", "on", "enable", "enabled"}
+
+    def _is_fp8_compute_supported(self) -> bool:
+        if not torch.cuda.is_available():
+            return False
+        try:
+            device = torch.device(self.device)
+        except (TypeError, ValueError):
+            # ``self.device`` may be a pipeline-specific abstraction; fall back to the
+            # current CUDA device when resolution fails.
+            device = torch.device("cuda")
+        if device.type != "cuda":
+            return False
+        capability_fn = getattr(torch.cuda, "get_device_capability", None)
+        if capability_fn is None:
+            return False
+        try:
+            major, _ = capability_fn(device)
+        except TypeError:
+            # Some PyTorch versions expect no arguments and infer the current device
+            major, _ = capability_fn()
+        except Exception:
+            return False
+        if major < 9:
+            return False
+        # ``torch.backends.cuda.matmul.allow_fp8" defaults to ``True`` on supporting builds,
+        # but guard against older releases where the attribute might be missing.
+        matmul_backend = getattr(torch.backends.cuda, "matmul", None)
+        allow_fp8 = getattr(matmul_backend, "allow_fp8", True) if matmul_backend is not None else True
+        return bool(allow_fp8)
+
     def _default_computation_dtype(self, storage_dtype: Optional[torch.dtype]) -> Optional[torch.dtype]:
         if storage_dtype in FLOAT8_STORAGE_DTYPES:
+            if self._fp8_compute_requested() and self._is_fp8_compute_supported():
+                return storage_dtype
             if torch.cuda.is_available():
                 bf16_supported = False
                 try:

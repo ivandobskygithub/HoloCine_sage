@@ -78,3 +78,20 @@ def test_temporal_tiler_accumulates_in_runtime_dtype_before_downcasting():
     assert output.dtype == torch.float8_e4m3fn
     assert output.device == latents.device
     assert torch.allclose(output.to(dtype=torch.float16), torch.ones_like(latents, dtype=torch.float16))
+
+
+def test_pipeline_can_opt_in_to_fp8_runtime(monkeypatch):
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("float8 not supported")
+
+    monkeypatch.setenv("HOLOCINE_ENABLE_FP8_COMPUTE", "1")
+
+    def fake_support(self):
+        return True
+
+    monkeypatch.setattr(WanVideoHoloCinePipeline, "_is_fp8_compute_supported", fake_support)
+
+    pipe = WanVideoHoloCinePipeline(device="cpu", torch_dtype=torch.float8_e4m3fn)
+    assert pipe.computation_dtype == torch.float8_e4m3fn
+
+    monkeypatch.delenv("HOLOCINE_ENABLE_FP8_COMPUTE")
