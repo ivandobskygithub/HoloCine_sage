@@ -81,27 +81,18 @@ def test_temporal_tiler_accumulates_in_runtime_dtype_before_downcasting():
     assert torch.allclose(output.to(dtype=torch.float16), torch.ones_like(latents, dtype=torch.float16))
 
 
-@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 not supported")
-def test_temporal_tiler_can_preserve_computation_dtype_when_requested():
-    latents = torch.zeros((1, 2, 4, 3, 3), dtype=torch.float8_e4m3fn)
+def test_pipeline_can_opt_in_to_fp8_runtime(monkeypatch):
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("float8 not supported")
 
-    tiler = TemporalTiler_BCTHW()
+    monkeypatch.setenv("HOLOCINE_ENABLE_FP8_COMPUTE", "1")
 
-    def model_fn(latents):
-        assert latents.dtype == torch.float16
-        return torch.ones_like(latents, dtype=torch.float16)
+    def fake_support(self):
+        return True
 
-    output = tiler.run(
-        model_fn,
-        sliding_window_size=2,
-        sliding_window_stride=2,
-        computation_device="cpu",
-        computation_dtype=torch.float16,
-        model_kwargs={"latents": latents},
-        tensor_names=["latents"],
-        return_to_storage=False,
-    )
+    monkeypatch.setattr(WanVideoHoloCinePipeline, "_is_fp8_compute_supported", fake_support)
 
-    assert output.dtype == torch.float16
-    assert output.device.type == "cpu"
-    assert torch.allclose(output, torch.ones_like(output))
+    pipe = WanVideoHoloCinePipeline(device="cpu", torch_dtype=torch.float8_e4m3fn)
+    assert pipe.computation_dtype == torch.float8_e4m3fn
+
+    monkeypatch.delenv("HOLOCINE_ENABLE_FP8_COMPUTE")
