@@ -21,6 +21,20 @@ def test_pipeline_uses_distinct_computation_dtype_for_float8_storage():
     assert pipe.computation_dtype != torch.float8_e4m3fn
 
 
+def test_pipeline_tracks_latent_storage_dtype_defaults():
+    pipe = WanVideoHoloCinePipeline(device="cpu", torch_dtype=torch.float16)
+    assert pipe.latent_storage_dtype == torch.float16
+
+    pipe.to(dtype=torch.float32)
+    assert pipe.latent_storage_dtype == torch.float32
+
+    pipe.set_latent_storage_dtype(torch.float16)
+    assert pipe.latent_storage_dtype == torch.float16
+
+    pipe.set_latent_storage_dtype(None)
+    assert pipe.latent_storage_dtype == pipe.torch_dtype
+
+
 def test_pipeline_respects_explicit_computation_dtype():
     pipe = WanVideoHoloCinePipeline(
         device="cpu",
@@ -54,6 +68,24 @@ def test_auto_wrapped_linear_casts_fp8_weights_for_linear():
     x_fp8 = torch.randn(2, 4).to(dtype=torch.float8_e4m3fn)
     out_fp8 = wrapper(x_fp8)
     assert out_fp8.dtype == torch.float16
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 not supported")
+def test_pipeline_casts_latents_to_storage_dtype():
+    pipe = WanVideoHoloCinePipeline(
+        device="cpu",
+        torch_dtype=torch.bfloat16,
+        latent_storage_dtype=torch.float8_e4m3fn,
+    )
+
+    latents = torch.zeros((1, 2, 4, 3, 3), dtype=torch.bfloat16)
+    first_frame = latents[:, :, :1].clone()
+    inputs = {"latents": latents.clone(), "first_frame_latents": first_frame.clone()}
+
+    pipe._ensure_latent_storage(inputs)
+
+    assert inputs["latents"].dtype == torch.float8_e4m3fn
+    assert inputs["first_frame_latents"].dtype == torch.float8_e4m3fn
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 not supported")
