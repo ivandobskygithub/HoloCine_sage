@@ -15,6 +15,7 @@ imports.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
@@ -90,7 +91,19 @@ def _load_backends() -> Dict[str, _BackendImplementation]:
             q_local = rearrange(q, "b s (n d) -> b s n d", n=num_heads).contiguous()
             k_local = rearrange(k, "b s (n d) -> b s n d", n=num_heads).contiguous()
             v_local = rearrange(v, "b s (n d) -> b s n d", n=num_heads).contiguous()
-            result = attn_func(q_local, k_local, v_local, dropout_p=dropout_p)
+
+            try:
+                result = attn_func(q_local, k_local, v_local, dropout_p=dropout_p)
+            except TypeError as exc:
+                # Some compiled FlashAttention/SageAttention builds (notably
+                # FlashAttention 3) only expose positional arguments.  Retry
+                # the call without the keyword to stay compatible across
+                # versions.
+                try:
+                    result = attn_func(q_local, k_local, v_local, dropout_p)
+                except TypeError:
+                    raise exc
+
             if isinstance(result, tuple):
                 result = result[0]
             return rearrange(result, "b s n d -> b s (n d)", n=num_heads)
@@ -163,6 +176,7 @@ def _load_backends() -> Dict[str, _BackendImplementation]:
 
 _BACKENDS = _load_backends()
 _SELECTED_BACKEND: Optional[_BackendImplementation] = None
+_LOGGER = logging.getLogger(__name__)
 
 
 def _normalise_backend_name(name: str) -> str:
@@ -210,6 +224,7 @@ def _ensure_backend_loaded() -> None:
     global _SELECTED_BACKEND  # noqa: PLW0603
     if _SELECTED_BACKEND is None:
         _SELECTED_BACKEND = _select_backend()
+        _LOGGER.info("Selected attention backend: %s", _SELECTED_BACKEND.name)
 
 
 def get_attention_backend_name() -> str:
