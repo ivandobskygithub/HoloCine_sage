@@ -268,6 +268,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
         window_stride: Optional[int],
         offload_device: torch.device,
         target_dtype: torch.dtype,
+        prefer_model_offload: bool,
     ) -> BlockSwapPlan:
         total_frames = latents.shape[2]
         element_size = torch.empty((), dtype=target_dtype).element_size()
@@ -281,15 +282,46 @@ class WanVideoHoloCinePipeline(BasePipeline):
         total_latent_gb = total_latent_bytes / (1024 ** 3)
 
         memory_snapshot = self._get_gpu_memory_snapshot()
-        available_gb = memory_snapshot.free_gb * 0.85 if memory_snapshot is not None else None
+        safety = 0.85
+        free_bytes = memory_snapshot.free_bytes if memory_snapshot is not None else None
+        available_bytes = int(free_bytes * safety) if free_bytes is not None else None
+
+        limit_bytes = int(limit_gb * (1024 ** 3)) if limit_gb is not None else None
+
+        model_bytes = self._estimate_iteration_model_bytes()
+        model_gb = model_bytes / (1024 ** 3)
+
+        prefer_model_offload_applied = False
+        if (
+            prefer_model_offload
+            and memory_snapshot is not None
+            and (available_bytes is None or total_latent_bytes > available_bytes)
+        ):
+            potential_free_bytes = memory_snapshot.free_bytes + model_bytes
+            potential_available_bytes = int(potential_free_bytes * safety)
+            limit_allows = limit_bytes is None or total_latent_bytes <= limit_bytes
+            if limit_allows and total_latent_bytes <= potential_available_bytes:
+                available_bytes = potential_available_bytes
+                prefer_model_offload_applied = True
+
+        available_gb = (
+            available_bytes / (1024 ** 3)
+            if available_bytes is not None
+            else None
+        )
 
         limit_candidates = []
-        if limit_gb is not None:
-            limit_candidates.append(limit_gb)
-        if available_gb is not None:
-            limit_candidates.append(available_gb)
-        effective_limit_gb = max(limit_candidates) if len(limit_candidates) == 1 else min(limit_candidates) if limit_candidates else max(total_latent_gb, 1.0)
-        effective_limit_bytes = max(per_frame_bytes, int(effective_limit_gb * (1024 ** 3)))
+        if limit_bytes is not None:
+            limit_candidates.append(limit_bytes)
+        if available_bytes is not None:
+            limit_candidates.append(available_bytes)
+        if len(limit_candidates) == 1:
+            effective_limit_bytes = max(per_frame_bytes, limit_candidates[0])
+        elif len(limit_candidates) > 1:
+            effective_limit_bytes = max(per_frame_bytes, min(limit_candidates))
+        else:
+            effective_limit_bytes = max(per_frame_bytes, total_latent_bytes, 1024 ** 3)
+        effective_limit_gb = effective_limit_bytes / (1024 ** 3)
 
         auto_window = max(1, min(total_frames, effective_limit_bytes // per_frame_bytes))
         if window_size is not None:
@@ -302,20 +334,28 @@ class WanVideoHoloCinePipeline(BasePipeline):
             sliding_window_stride = max(1, sliding_window_size // 2)
 
         use_block_swap = sliding_window_size < total_frames
-        reason = ""
+        reason = "latents fit after offloading models" if prefer_model_offload_applied else ""
         runtime_multiplier = 1.35
-        safety = 0.9
+        safety_runtime = 0.9
 
         if not use_block_swap:
             estimated_peak_bytes = int(total_latent_bytes * runtime_multiplier)
-            if memory_snapshot is not None and estimated_peak_bytes > memory_snapshot.free_bytes * safety:
+            if memory_snapshot is not None:
+                peak_available_bytes = memory_snapshot.free_bytes
+                if prefer_model_offload_applied:
+                    peak_available_bytes += model_bytes
+                peak_budget_bytes = int(peak_available_bytes * safety_runtime)
+            else:
+                peak_budget_bytes = None
+            if peak_budget_bytes is not None and estimated_peak_bytes > peak_budget_bytes:
                 use_block_swap = True
                 reason = "peak usage exceeds available VRAM"
                 if window_size is None:
                     sliding_window_size = auto_window
                     sliding_window_stride = max(1, sliding_window_size // 2)
             else:
-                reason = "full latent fits in VRAM"
+                if reason == "":
+                    reason = "full latent fits in VRAM"
 
         window_latent_bytes = per_frame_bytes * (sliding_window_size if use_block_swap else total_frames)
         window_latent_gb = window_latent_bytes / (1024 ** 3)
@@ -328,8 +368,6 @@ class WanVideoHoloCinePipeline(BasePipeline):
             )
         )
 
-        model_bytes = self._estimate_iteration_model_bytes()
-        model_gb = model_bytes / (1024 ** 3)
         self.logger.debug(
             (
                 f"[BlockSwap] Model footprint estimate: bytes={model_bytes}, "
@@ -337,13 +375,16 @@ class WanVideoHoloCinePipeline(BasePipeline):
             )
         )
 
-        offload_models = False
+        offload_models = prefer_model_offload_applied
         vram_limit_gb = None
         if memory_snapshot is not None:
-            budget_gb = memory_snapshot.free_gb * safety
-            requirement_gb = window_latent_gb + model_gb
-            if requirement_gb > budget_gb:
+            budget_bytes = int(memory_snapshot.free_bytes * safety)
+            if prefer_model_offload_applied and available_bytes is not None:
+                budget_bytes = available_bytes
+            requirement_bytes = window_latent_bytes + model_bytes
+            if requirement_bytes > budget_bytes:
                 offload_models = True
+                budget_gb = budget_bytes / (1024 ** 3)
                 vram_limit_gb = max(1.0, budget_gb - window_latent_gb)
                 if reason == "":
                     reason = "models exceed VRAM budget"
@@ -362,7 +403,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
             (
                 f"[BlockSwap] Effective limits: limit_gb={effective_limit_gb:.3f}, "
                 f"available_gb={available_display}, "
-                f"runtime_multiplier={runtime_multiplier}, safety={safety}"
+                f"runtime_multiplier={runtime_multiplier}, safety={safety_runtime}"
             )
         )
 
@@ -404,6 +445,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
         window_stride: Optional[int],
         offload_device: str,
         offload_dtype: Optional[torch.dtype],
+        prefer_model_offload: bool,
     ) -> Optional[BlockSwapConfig]:
         latents: Optional[torch.Tensor] = inputs_shared.get("latents")
         if latents is None:
@@ -420,6 +462,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
             window_stride=window_stride,
             offload_device=torch.device(offload_device),
             target_dtype=offload_dtype or latents.dtype,
+            prefer_model_offload=prefer_model_offload,
         )
 
         self.logger.info(
@@ -876,6 +919,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
         block_swap_stride: Optional[int] = None,
         block_swap_device: str = "cpu",
         block_swap_dtype: Optional[torch.dtype] = None,
+        block_swap_prefer_model_offload: bool = True,
     ):
         # Scheduler
         self.scheduler.set_timesteps(num_inference_steps, denoising_strength=denoising_strength, shift=sigma_shift)
@@ -918,6 +962,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 window_stride=block_swap_stride,
                 offload_device=block_swap_device,
                 offload_dtype=block_swap_dtype,
+                prefer_model_offload=block_swap_prefer_model_offload,
             )
             if block_swap_config is not None:
                 if sliding_window_size is None:
