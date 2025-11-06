@@ -73,6 +73,7 @@ def test_temporal_tiler_accumulates_in_runtime_dtype_before_downcasting():
         computation_dtype=torch.float16,
         model_kwargs={"latents": latents},
         tensor_names=["latents"],
+        return_to_storage=True,
     )
 
     assert output.dtype == torch.float8_e4m3fn
