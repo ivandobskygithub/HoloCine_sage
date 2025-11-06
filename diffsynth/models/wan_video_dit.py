@@ -169,7 +169,35 @@ def attention_per_batch_with_shots(
 
     for bi in range(b):
 
-        cuts = list(shot_latent_indices[bi])
+        raw_cuts = shot_latent_indices[bi]
+        if isinstance(raw_cuts, torch.Tensor):
+            cuts = raw_cuts.detach().cpu().tolist()
+        else:
+            cuts = list(raw_cuts)
+
+        if len(cuts) == 0:
+            cuts = [0, s_tot]
+        else:
+            cuts = [int(c) for c in cuts]
+
+            # Remove indices that are outside the valid token range and
+            # ensure the sequence is strictly increasing.
+            cuts = [c for c in cuts if 0 <= c <= s_tot]
+            cuts = sorted(set(cuts))
+
+            if not cuts or cuts[0] != 0:
+                cuts = [0] + cuts
+
+            cleaned = [cuts[0]]
+            for c in cuts[1:]:
+                if c > cleaned[-1]:
+                    cleaned.append(c)
+
+            if cleaned[-1] != s_tot:
+                cleaned.append(s_tot)
+
+            cuts = cleaned
+
         assert cuts[0] == 0 and cuts[-1] == s_tot, "shot_latent_indices must start with 0 and end with s_tot"
 
         Q_shots, K_shots, V_shots = [], [], []
