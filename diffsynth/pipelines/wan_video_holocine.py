@@ -31,6 +31,18 @@ from ..vram_management import enable_vram_management, AutoWrappedModule, AutoWra
 from ..lora import GeneralLoRALoader
 
 
+FLOAT8_STORAGE_DTYPES = {
+    getattr(torch, name)
+    for name in (
+        "float8_e4m3fn",
+        "float8_e4m3fnuz",
+        "float8_e5m2",
+        "float8_e5m2fnuz",
+    )
+    if hasattr(torch, name)
+}
+
+
 BLOCK_SWAP_LOGGER_NAME = "holocine.blockswap"
 
 
@@ -117,7 +129,13 @@ class WanVideoHoloCinePipeline(BasePipeline):
         logger.debug("Initialized block swap logger at %s", log_path)
         return logger
 
-    def __init__(self, device="cuda", torch_dtype=torch.bfloat16, tokenizer_path=None):
+    def __init__(
+        self,
+        device="cuda",
+        torch_dtype=torch.bfloat16,
+        tokenizer_path=None,
+        computation_dtype: Optional[torch.dtype] = None,
+    ):
         super().__init__(
             device=device, torch_dtype=torch_dtype,
             height_division_factor=16, width_division_factor=16, time_division_factor=4, time_division_remainder=1
@@ -138,6 +156,10 @@ class WanVideoHoloCinePipeline(BasePipeline):
         self.vae: WanVideoVAE = None
         self.motion_controller: WanMotionControllerModel = None
         self.vace: VaceWanModel = None
+        self._computation_dtype_explicit = computation_dtype is not None
+        self.computation_dtype = (
+            computation_dtype if self._computation_dtype_explicit else self._default_computation_dtype(self.torch_dtype)
+        )
         self.model_names = [
             "text_encoder",
             "image_encoder",
@@ -175,8 +197,9 @@ class WanVideoHoloCinePipeline(BasePipeline):
         
     
     def load_lora(self, module, path, alpha=1):
-        loader = GeneralLoRALoader(torch_dtype=self.torch_dtype, device=self.device)
-        lora = load_state_dict(path, torch_dtype=self.torch_dtype, device=self.device)
+        target_dtype = self.computation_dtype or self.torch_dtype
+        loader = GeneralLoRALoader(torch_dtype=target_dtype, device=self.device)
+        lora = load_state_dict(path, torch_dtype=target_dtype, device=self.device)
         loader.load(module, lora, alpha=alpha)
 
 
@@ -200,6 +223,33 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 f"allocated≈{snapshot.allocated_gb:.2f}GB, total≈{snapshot.total_gb:.2f}GB"
             ),
         )
+
+    def _default_computation_dtype(self, storage_dtype: Optional[torch.dtype]) -> Optional[torch.dtype]:
+        if storage_dtype in FLOAT8_STORAGE_DTYPES:
+            if torch.cuda.is_available():
+                bf16_supported = False
+                try:
+                    bf16_supported = torch.cuda.is_bf16_supported()
+                except AttributeError:
+                    # Older PyTorch builds may not provide ``is_bf16_supported``; fall back to float16.
+                    bf16_supported = False
+                if bf16_supported:
+                    return torch.bfloat16
+                return torch.float16
+            return torch.float32
+        return storage_dtype
+
+    def set_computation_dtype(self, dtype: Optional[torch.dtype]) -> None:
+        self._computation_dtype_explicit = dtype is not None
+        self.computation_dtype = (
+            dtype if self._computation_dtype_explicit else self._default_computation_dtype(self.torch_dtype)
+        )
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        if not self._computation_dtype_explicit:
+            self.computation_dtype = self._default_computation_dtype(self.torch_dtype)
+        return self
 
 
     def _estimate_block_swap_window(
@@ -584,20 +634,12 @@ class WanVideoHoloCinePipeline(BasePipeline):
 
     def enable_vram_management(self, num_persistent_param_in_dit=None, vram_limit=None, vram_buffer=0.5):
         self.vram_management_enabled = True
-        float8_dtypes = {
-            getattr(torch, name)
-            for name in (
-                "float8_e4m3fn",
-                "float8_e4m3fnuz",
-                "float8_e5m2",
-                "float8_e5m2fnuz",
-            )
-            if hasattr(torch, name)
-        }
+        float8_dtypes = FLOAT8_STORAGE_DTYPES
 
         def resolve_computation_dtype(param_dtype: torch.dtype) -> torch.dtype:
-            target_dtype = self.torch_dtype if param_dtype in float8_dtypes and self.torch_dtype is not None else param_dtype
-            return target_dtype
+            if param_dtype in float8_dtypes:
+                return self.computation_dtype or self._default_computation_dtype(self.torch_dtype)
+            return param_dtype
 
         if num_persistent_param_in_dit is not None:
             vram_limit = None
@@ -806,6 +848,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
     def from_pretrained(
         torch_dtype: torch.dtype = torch.bfloat16,
         device: Union[str, torch.device] = "cuda",
+        computation_dtype: Optional[torch.dtype] = None,
         model_configs: list[ModelConfig] = [],
         tokenizer_config: ModelConfig = ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/*"),
         redirect_common_files: bool = True,
@@ -827,7 +870,11 @@ class WanVideoHoloCinePipeline(BasePipeline):
                     model_config.model_id = redirect_dict[model_config.origin_file_pattern]
         
         # Initialize pipeline
-        pipe = WanVideoHoloCinePipeline(device=device, torch_dtype=torch_dtype)
+        pipe = WanVideoHoloCinePipeline(
+            device=device,
+            torch_dtype=torch_dtype,
+            computation_dtype=computation_dtype,
+        )
         if use_usp: pipe.initialize_usp()
         
         # Download and load models
@@ -960,7 +1007,8 @@ class WanVideoHoloCinePipeline(BasePipeline):
             "tiled": tiled, "tile_size": tile_size, "tile_stride": tile_stride,
             "sliding_window_size": sliding_window_size, "sliding_window_stride": sliding_window_stride,
             "shot_cut_frames": shot_cut_frames,
-            "shot_mask_type": shot_mask_type
+            "shot_mask_type": shot_mask_type,
+            "computation_dtype": self.computation_dtype,
         }
         for unit in self.units:
             inputs_shared, inputs_posi, inputs_nega = self.unit_runner(unit, self, inputs_shared, inputs_posi, inputs_nega)
@@ -983,7 +1031,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 if sliding_window_stride is None:
                     sliding_window_stride = block_swap_config.sliding_window_stride
                 inputs_shared["computation_device"] = self.device
-                inputs_shared["computation_dtype"] = self.torch_dtype
+                inputs_shared["computation_dtype"] = self.computation_dtype
                 inputs_shared["sliding_window_size"] = sliding_window_size
                 inputs_shared["sliding_window_stride"] = sliding_window_stride
                 for tensor_dict in (inputs_posi, inputs_nega):
@@ -1936,6 +1984,28 @@ def model_fn_wan_video(
             batch_size=2 if cfg_merge else 1
         )
     
+    target_device = computation_device or (latents.device if latents is not None else None)
+    target_dtype = computation_dtype or (latents.dtype if latents is not None else None)
+
+    def _to_computation(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if tensor is None or not isinstance(tensor, torch.Tensor):
+            return tensor
+        kwargs = {}
+        if target_device is not None and tensor.device != target_device:
+            kwargs["device"] = target_device
+        if target_dtype is not None and tensor.dtype != target_dtype:
+            kwargs["dtype"] = target_dtype
+        if kwargs:
+            tensor = tensor.to(**kwargs)
+        return tensor
+
+    latents = _to_computation(latents)
+    y = _to_computation(y)
+    reference_latents = _to_computation(reference_latents)
+    vace_context = _to_computation(vace_context)
+    clip_feature = _to_computation(clip_feature)
+    control_camera_latents_input = _to_computation(control_camera_latents_input)
+
     if use_unified_sequence_parallel:
         import torch.distributed as dist
         from xfuser.core.distributed import (get_sequence_parallel_rank,
