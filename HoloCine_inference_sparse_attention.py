@@ -1,5 +1,8 @@
-import torch
+import logging
 import math
+from typing import Optional
+
+import torch
 from diffsynth import save_video
 from diffsynth.pipelines.wan_video_holocine import WanVideoHoloCinePipeline, ModelConfig
 
@@ -87,6 +90,14 @@ def run_inference(
     height: int = 240,
     width: int = 416,
     num_inference_steps: int = 50,
+
+    # --- Block Swap Controls ---
+    enable_block_swap: bool = True,
+    block_swap_limit_gb: float = 32.0,
+    block_swap_size: Optional[int] = None,
+    block_swap_stride: Optional[int] = None,
+    block_swap_device: str = "cpu",
+    block_swap_dtype: Optional[torch.dtype] = None,
     
     # --- Output Parameters ---
     fps: int = 15,
@@ -109,8 +120,17 @@ def run_inference(
         "tiled": tiled,
         "height": height,
         "width": width,
-        "num_inference_steps": num_inference_steps
+        "num_inference_steps": num_inference_steps,
+        "enable_block_swap": enable_block_swap,
+        "block_swap_limit_gb": block_swap_limit_gb,
+        "block_swap_size": block_swap_size,
+        "block_swap_stride": block_swap_stride,
+        "block_swap_device": block_swap_device,
+        "block_swap_dtype": block_swap_dtype,
     }
+
+    if pipe_kwargs["block_swap_dtype"] is None and hasattr(pipe, "torch_dtype"):
+        pipe_kwargs["block_swap_dtype"] = pipe.torch_dtype
 
     # --- 2. Auto-Detection Logic ---
     if global_caption and shot_captions:
@@ -162,7 +182,7 @@ def run_inference(
     final_pipe_kwargs = {k: v for k, v in pipe_kwargs.items() if v is not None}
     
     if "prompt" not in final_pipe_kwargs:
-         raise ValueError("A 'prompt' or ('global_caption' + 'shot_captions') is required.")
+        raise ValueError("A 'prompt' or ('global_caption' + 'shot_captions') is required.")
 
     # --- 4. Run Generation ---
     print(f"Running inference...")
@@ -215,6 +235,16 @@ pipe.dit.use_sparse_self_attn=True
 pipe.dit2.use_sparse_self_attn=True
 pipe.enable_vram_management()
 pipe.to(device)
+
+blockswap_log_paths = [
+    handler.baseFilename
+    for handler in pipe.logger.handlers
+    if isinstance(handler, logging.FileHandler)
+]
+if blockswap_log_paths:
+    print(f"Block swap diagnostics will be written to {blockswap_log_paths[0]}")
+else:
+    print("Block swap diagnostics file handler was not detected; logs will stream to stdout only.")
 
 # --- 2. Define Common Parameters ---
 scene_negative_prompt = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
