@@ -96,6 +96,7 @@ class AutoWrappedLinear(torch.nn.Linear, AutoTorchModule):
     def __init__(self, module: torch.nn.Linear, offload_dtype, offload_device, onload_dtype, onload_device, computation_dtype, computation_device, vram_limit, name="", **kwargs):
         with init_weights_on_device(device=torch.device("meta")):
             super().__init__(in_features=module.in_features, out_features=module.out_features, bias=module.bias is not None, dtype=offload_dtype, device=offload_device)
+        module = module.to(dtype=offload_dtype, device=offload_device)
         self.weight = module.weight
         self.bias = module.bias
         self.offload_dtype = offload_dtype
@@ -123,6 +124,14 @@ class AutoWrappedLinear(torch.nn.Linear, AutoTorchModule):
             else:
                 weight = cast_to(self.weight, self.computation_dtype, self.computation_device)
                 bias = None if self.bias is None else cast_to(self.bias, self.computation_dtype, self.computation_device)
+
+        if x.device != self.computation_device or x.dtype != self.computation_dtype:
+            x = x.to(device=self.computation_device, dtype=self.computation_dtype)
+        if weight.device != self.computation_device or weight.dtype != self.computation_dtype:
+            weight = cast_to(weight, self.computation_dtype, self.computation_device)
+        if bias is not None and (bias.device != self.computation_device or bias.dtype != self.computation_dtype):
+            bias = cast_to(bias, self.computation_dtype, self.computation_device)
+
         out = torch.nn.functional.linear(x, weight, bias)
         
         if len(self.lora_A_weights) == 0:
