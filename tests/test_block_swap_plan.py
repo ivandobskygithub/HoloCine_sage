@@ -150,6 +150,54 @@ def test_configure_block_swap_keeps_latents_on_pipeline_device_when_not_swapping
     assert inputs["latents"].dtype == torch.float16
 
 
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 not supported")
+def test_configure_block_swap_preserves_float8_storage_when_not_swapping():
+    pipe = WanVideoHoloCinePipeline(
+        device="cpu",
+        torch_dtype=torch.bfloat16,
+        latent_storage_dtype=torch.float8_e4m3fn,
+    )
+
+    latents = torch.zeros((1, 2, 4, 8, 8), dtype=torch.float8_e4m3fn)
+    inputs = {"latents": latents.clone()}
+
+    plan = BlockSwapPlan(
+        use_block_swap=False,
+        config=None,
+        storage_device=torch.device("cpu"),
+        storage_dtype=torch.float8_e4m3fn,
+        available_gb=1.5,
+        total_latent_gb=0.01,
+        window_latent_gb=0.01,
+        storage_total_gb=0.01,
+        storage_window_gb=0.01,
+        model_gb=0.02,
+        window_size=latents.shape[2],
+        window_stride=latents.shape[2],
+        effective_limit_gb=1.5,
+        offload_models=True,
+        vram_limit_gb=0.5,
+        reason="latents fit after offloading models",
+    )
+
+    pipe._plan_block_swap_strategy = lambda **_: plan
+
+    result = pipe._configure_block_swap(
+        inputs_shared=inputs,
+        limit_gb=1.0,
+        window_size=None,
+        window_stride=None,
+        offload_device="cpu",
+        offload_dtype=torch.float8_e4m3fn,
+        prefer_model_offload=True,
+        force_block_swap=True,
+    )
+
+    assert result is None
+    assert pipe._auto_memory_plan is plan
+    assert inputs["latents"].dtype == torch.float8_e4m3fn
+
+
 def test_plan_reports_runtime_and_storage_latent_sizes_separately():
     if not hasattr(torch, "float8_e4m3fn"):
         pytest.skip("float8 not supported in this PyTorch build")
