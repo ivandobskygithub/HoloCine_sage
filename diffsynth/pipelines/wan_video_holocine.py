@@ -608,7 +608,15 @@ class WanVideoHoloCinePipeline(BasePipeline):
 
         self._log_gpu_memory_state("[BlockSwap] Pre-configuration")
 
-        storage_dtype = offload_dtype or latents.dtype
+        storage_dtype = offload_dtype
+        if storage_dtype is None:
+            # Honour the pipeline's preferred latent storage dtype whenever a
+            # caller has not explicitly opted into a different block swap
+            # precision.  This allows configurations that request float8
+            # latents to keep that precision for the offloaded tensors even if
+            # the in-memory representation is temporarily promoted during
+            # computation.
+            storage_dtype = self.latent_storage_dtype or latents.dtype
         runtime_dtype = self.computation_dtype or (latents.dtype if latents is not None else None)
         if runtime_dtype is None:
             runtime_dtype = latents.dtype
