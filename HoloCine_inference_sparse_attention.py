@@ -209,6 +209,7 @@ def run_inference(
 device = 'cuda'
 pipe = WanVideoHoloCinePipeline.from_pretrained(
     torch_dtype=torch.bfloat16,
+    latent_storage_dtype=torch.float8_e4m3fn,
     device=device,
     model_configs=[
         ModelConfig(

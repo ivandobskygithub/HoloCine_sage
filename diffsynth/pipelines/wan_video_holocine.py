@@ -137,6 +137,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
         torch_dtype=torch.bfloat16,
         tokenizer_path=None,
         computation_dtype: Optional[torch.dtype] = None,
+        latent_storage_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__(
             device=device, torch_dtype=torch_dtype,
@@ -162,6 +163,8 @@ class WanVideoHoloCinePipeline(BasePipeline):
         self.computation_dtype = (
             computation_dtype if self._computation_dtype_explicit else self._default_computation_dtype(self.torch_dtype)
         )
+        self._latent_storage_dtype_explicit = latent_storage_dtype is not None
+        self.latent_storage_dtype = latent_storage_dtype if self._latent_storage_dtype_explicit else self.torch_dtype
         self.model_names = [
             "text_encoder",
             "image_encoder",
@@ -289,7 +292,46 @@ class WanVideoHoloCinePipeline(BasePipeline):
         super().to(*args, **kwargs)
         if not self._computation_dtype_explicit:
             self.computation_dtype = self._default_computation_dtype(self.torch_dtype)
+        if not getattr(self, "_latent_storage_dtype_explicit", False):
+            self.latent_storage_dtype = self.torch_dtype
         return self
+
+    def set_latent_storage_dtype(self, dtype: Optional[torch.dtype]) -> None:
+        self._latent_storage_dtype_explicit = dtype is not None
+        self.latent_storage_dtype = dtype if self._latent_storage_dtype_explicit else self.torch_dtype
+
+    def _cast_to_latent_storage(
+        self,
+        tensor: Optional[torch.Tensor],
+        device: Optional[Union[str, torch.device]] = None,
+    ) -> Optional[torch.Tensor]:
+        if tensor is None or not isinstance(tensor, torch.Tensor):
+            return tensor
+        target_dtype = self.latent_storage_dtype or tensor.dtype
+        target_device = None
+        if device is not None:
+            target_device = torch.device(device)
+        elif isinstance(self.device, torch.device):
+            target_device = self.device
+        else:
+            target_device = torch.device(self.device)
+        kwargs = {}
+        if tensor.dtype != target_dtype:
+            kwargs["dtype"] = target_dtype
+        if target_device is not None and tensor.device != target_device:
+            kwargs["device"] = target_device
+        if kwargs:
+            tensor = tensor.to(**kwargs)
+        return tensor
+
+    def _ensure_latent_storage(self, inputs_shared: dict) -> None:
+        latents = inputs_shared.get("latents")
+        if isinstance(latents, torch.Tensor):
+            inputs_shared["latents"] = self._cast_to_latent_storage(latents, device=latents.device)
+        first_frame = inputs_shared.get("first_frame_latents")
+        if isinstance(first_frame, torch.Tensor):
+            device = latents.device if isinstance(latents, torch.Tensor) else first_frame.device
+            inputs_shared["first_frame_latents"] = self._cast_to_latent_storage(first_frame, device=device)
 
 
     def _estimate_block_swap_window(
@@ -517,7 +559,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
         )
 
         storage_device = offload_device if use_block_swap else torch.device(self.device)
-        plan_storage_dtype = storage_dtype if use_block_swap else (self.torch_dtype or latents.dtype)
+        plan_storage_dtype = storage_dtype if use_block_swap else latents.dtype
 
         config = None
         if use_block_swap and sliding_window_size < total_frames:
@@ -566,7 +608,15 @@ class WanVideoHoloCinePipeline(BasePipeline):
 
         self._log_gpu_memory_state("[BlockSwap] Pre-configuration")
 
-        storage_dtype = offload_dtype or latents.dtype
+        storage_dtype = offload_dtype
+        if storage_dtype is None:
+            # Honour the pipeline's preferred latent storage dtype whenever a
+            # caller has not explicitly opted into a different block swap
+            # precision.  This allows configurations that request float8
+            # latents to keep that precision for the offloaded tensors even if
+            # the in-memory representation is temporarily promoted during
+            # computation.
+            storage_dtype = self.latent_storage_dtype or latents.dtype
         runtime_dtype = self.computation_dtype or (latents.dtype if latents is not None else None)
         if runtime_dtype is None:
             runtime_dtype = latents.dtype
@@ -907,6 +957,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
         torch_dtype: torch.dtype = torch.bfloat16,
         device: Union[str, torch.device] = "cuda",
         computation_dtype: Optional[torch.dtype] = None,
+        latent_storage_dtype: Optional[torch.dtype] = None,
         model_configs: list[ModelConfig] = [],
         tokenizer_config: ModelConfig = ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/*"),
         redirect_common_files: bool = True,
@@ -932,6 +983,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
             device=device,
             torch_dtype=torch_dtype,
             computation_dtype=computation_dtype,
+            latent_storage_dtype=latent_storage_dtype,
         )
         if use_usp: pipe.initialize_usp()
         
@@ -1071,6 +1123,8 @@ class WanVideoHoloCinePipeline(BasePipeline):
         for unit in self.units:
             inputs_shared, inputs_posi, inputs_nega = self.unit_runner(unit, self, inputs_shared, inputs_posi, inputs_nega)
 
+        self._ensure_latent_storage(inputs_shared)
+
         block_swap_config = None
         if enable_block_swap or block_swap_size is not None or block_swap_stride is not None:
             block_swap_config = self._configure_block_swap(
@@ -1174,7 +1228,11 @@ class WanVideoHoloCinePipeline(BasePipeline):
 
         # Decode
         self.load_models_to_device(['vae'])
-        video = self.vae.decode(inputs_shared["latents"], device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+        decode_dtype = self.computation_dtype or self._default_computation_dtype(self.latent_storage_dtype)
+        if decode_dtype is None:
+            decode_dtype = inputs_shared["latents"].dtype
+        decode_latents = inputs_shared["latents"].to(device=self.device, dtype=decode_dtype)
+        video = self.vae.decode(decode_latents, device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
         video = self.vae_output_to_video(video)
         self.load_models_to_device([])
 
