@@ -269,6 +269,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
         offload_device: torch.device,
         target_dtype: torch.dtype,
         prefer_model_offload: bool,
+        force_block_swap: bool,
     ) -> BlockSwapPlan:
         total_frames = latents.shape[2]
         element_size = torch.empty((), dtype=target_dtype).element_size()
@@ -333,8 +334,17 @@ class WanVideoHoloCinePipeline(BasePipeline):
         else:
             sliding_window_stride = max(1, sliding_window_size // 2)
 
-        use_block_swap = sliding_window_size < total_frames
+        if force_block_swap and total_frames > 1 and sliding_window_size >= total_frames:
+            fallback_window = max(1, min(total_frames - 1, max(1, total_frames // 2)))
+            sliding_window_size = min(sliding_window_size, fallback_window)
+            sliding_window_stride = max(1, min(sliding_window_size, sliding_window_stride))
+
+        use_block_swap = force_block_swap or sliding_window_size < total_frames
+        if total_frames <= 1:
+            use_block_swap = False
         reason = "latents fit after offloading models" if prefer_model_offload_applied else ""
+        if force_block_swap and total_frames > 1:
+            reason = (reason + "; " if reason else "") + "block swap requested"
         runtime_multiplier = 1.35
         safety_runtime = 0.9
 
@@ -411,7 +421,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
         storage_dtype = target_dtype if use_block_swap else (self.torch_dtype or latents.dtype)
 
         config = None
-        if use_block_swap:
+        if use_block_swap and sliding_window_size < total_frames:
             config = BlockSwapConfig(
                 offload_device=storage_device,
                 offload_dtype=storage_dtype,
@@ -446,6 +456,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
         offload_device: str,
         offload_dtype: Optional[torch.dtype],
         prefer_model_offload: bool,
+        force_block_swap: bool,
     ) -> Optional[BlockSwapConfig]:
         latents: Optional[torch.Tensor] = inputs_shared.get("latents")
         if latents is None:
@@ -463,6 +474,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
             offload_device=torch.device(offload_device),
             target_dtype=offload_dtype or latents.dtype,
             prefer_model_offload=prefer_model_offload,
+            force_block_swap=force_block_swap,
         )
 
         self.logger.info(
@@ -963,6 +975,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 offload_device=block_swap_device,
                 offload_dtype=block_swap_dtype,
                 prefer_model_offload=block_swap_prefer_model_offload,
+                force_block_swap=enable_block_swap,
             )
             if block_swap_config is not None:
                 if sliding_window_size is None:

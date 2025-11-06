@@ -41,6 +41,7 @@ def test_plan_prefers_model_offload_when_latents_fit_after_offload():
         offload_device=torch.device("cpu"),
         target_dtype=torch.float16,
         prefer_model_offload=True,
+        force_block_swap=False,
     )
 
     assert plan.use_block_swap is False
@@ -65,10 +66,39 @@ def test_plan_retains_block_swap_when_latents_exceed_limit():
         offload_device=torch.device("cpu"),
         target_dtype=torch.float16,
         prefer_model_offload=True,
+        force_block_swap=False,
     )
 
     assert plan.use_block_swap is True
 
+
+
+
+
+def test_plan_can_offload_and_block_swap_when_requested():
+    pipe = WanVideoHoloCinePipeline(device="cuda", torch_dtype=torch.float16)
+    pipe._get_gpu_memory_snapshot = lambda device=None: make_snapshot(40.0, 0.25, 39.75)
+    pipe._estimate_iteration_model_bytes = lambda: _to_bytes(0.1)
+
+    latents = torch.zeros((1, 4, 30, 1000, 1000), dtype=torch.float16)
+
+    plan = pipe._plan_block_swap_strategy(
+        latents=latents,
+        conditioning=None,
+        limit_gb=0.25,
+        window_size=None,
+        window_stride=None,
+        offload_device=torch.device("cpu"),
+        target_dtype=torch.float16,
+        prefer_model_offload=True,
+        force_block_swap=True,
+    )
+
+    assert plan.use_block_swap is True
+    assert plan.offload_models is True
+    assert plan.config is not None
+    assert plan.config.sliding_window_size < latents.shape[2]
+    assert "block swap requested" in plan.reason
 
 
 def test_configure_block_swap_keeps_latents_on_pipeline_device_when_not_swapping():
@@ -104,6 +134,7 @@ def test_configure_block_swap_keeps_latents_on_pipeline_device_when_not_swapping
         offload_device="cpu",
         offload_dtype=torch.float16,
         prefer_model_offload=True,
+        force_block_swap=True,
     )
 
     assert result is None
