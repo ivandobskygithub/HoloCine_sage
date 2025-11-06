@@ -3,6 +3,7 @@ import pathlib
 import sys
 
 import torch
+import pytest
 
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -39,7 +40,8 @@ def test_plan_prefers_model_offload_when_latents_fit_after_offload():
         window_size=None,
         window_stride=None,
         offload_device=torch.device("cpu"),
-        target_dtype=torch.float16,
+        storage_dtype=torch.float16,
+        runtime_dtype=torch.float16,
         prefer_model_offload=True,
         force_block_swap=False,
     )
@@ -64,7 +66,8 @@ def test_plan_retains_block_swap_when_latents_exceed_limit():
         window_size=None,
         window_stride=None,
         offload_device=torch.device("cpu"),
-        target_dtype=torch.float16,
+        storage_dtype=torch.float16,
+        runtime_dtype=torch.float16,
         prefer_model_offload=True,
         force_block_swap=False,
     )
@@ -89,7 +92,8 @@ def test_plan_can_offload_and_block_swap_when_requested():
         window_size=None,
         window_stride=None,
         offload_device=torch.device("cpu"),
-        target_dtype=torch.float16,
+        storage_dtype=torch.float16,
+        runtime_dtype=torch.float16,
         prefer_model_offload=True,
         force_block_swap=True,
     )
@@ -115,6 +119,8 @@ def test_configure_block_swap_keeps_latents_on_pipeline_device_when_not_swapping
         available_gb=1.5,
         total_latent_gb=0.01,
         window_latent_gb=0.01,
+        storage_total_gb=0.01,
+        storage_window_gb=0.01,
         model_gb=0.02,
         window_size=latents.shape[2],
         window_stride=latents.shape[2],
@@ -142,3 +148,36 @@ def test_configure_block_swap_keeps_latents_on_pipeline_device_when_not_swapping
     assert pipe.cpu_offload is True
     assert inputs["latents"].device.type == "cpu"
     assert inputs["latents"].dtype == torch.float16
+
+
+def test_plan_reports_runtime_and_storage_latent_sizes_separately():
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("float8 not supported in this PyTorch build")
+
+    pipe = WanVideoHoloCinePipeline(device="cuda", torch_dtype=torch.float8_e4m3fn, computation_dtype=torch.bfloat16)
+    pipe._get_gpu_memory_snapshot = lambda device=None: None
+    pipe._estimate_iteration_model_bytes = lambda: 0
+
+    latents = torch.zeros((1, 2, 4, 8, 8), dtype=torch.float8_e4m3fn)
+
+    plan = pipe._plan_block_swap_strategy(
+        latents=latents,
+        conditioning=None,
+        limit_gb=10.0,
+        window_size=None,
+        window_stride=None,
+        offload_device=torch.device("cpu"),
+        storage_dtype=torch.float8_e4m3fn,
+        runtime_dtype=torch.bfloat16,
+        prefer_model_offload=False,
+        force_block_swap=False,
+    )
+
+    per_frame_elements = latents[:, :, :1].numel()
+    runtime_bytes = per_frame_elements * torch.empty((), dtype=torch.bfloat16).element_size() * latents.shape[2]
+    storage_bytes = per_frame_elements * torch.empty((), dtype=torch.float8_e4m3fn).element_size() * latents.shape[2]
+
+    assert math.isclose(plan.total_latent_gb, runtime_bytes / (1024 ** 3))
+    assert math.isclose(plan.storage_total_gb, storage_bytes / (1024 ** 3))
+    assert math.isclose(plan.window_latent_gb, plan.total_latent_gb)
+    assert math.isclose(plan.storage_window_gb, plan.storage_total_gb)

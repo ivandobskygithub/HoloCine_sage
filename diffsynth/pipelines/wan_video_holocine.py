@@ -83,6 +83,8 @@ class BlockSwapPlan:
     available_gb: Optional[float]
     total_latent_gb: float
     window_latent_gb: float
+    storage_total_gb: float
+    storage_window_gb: float
     model_gb: float
     window_size: int
     window_stride: int
@@ -317,20 +319,25 @@ class WanVideoHoloCinePipeline(BasePipeline):
         window_size: Optional[int],
         window_stride: Optional[int],
         offload_device: torch.device,
-        target_dtype: torch.dtype,
+        storage_dtype: torch.dtype,
+        runtime_dtype: torch.dtype,
         prefer_model_offload: bool,
         force_block_swap: bool,
     ) -> BlockSwapPlan:
         total_frames = latents.shape[2]
-        element_size = torch.empty((), dtype=target_dtype).element_size()
+        storage_element_size = torch.empty((), dtype=storage_dtype).element_size()
+        runtime_element_size = torch.empty((), dtype=runtime_dtype).element_size()
         per_frame_elements = latents[:, :, :1].numel()
-        per_frame_bytes = per_frame_elements * element_size
+        per_frame_storage_bytes = per_frame_elements * storage_element_size
+        per_frame_runtime_bytes = per_frame_elements * runtime_element_size
         if conditioning is not None and conditioning.ndim >= 3 and conditioning.shape[2] == total_frames:
-            cond_size = torch.empty((), dtype=target_dtype).element_size()
-            per_frame_bytes += conditioning[:, :, :1].numel() * cond_size
+            per_frame_storage_bytes += conditioning[:, :, :1].numel() * storage_element_size
+            per_frame_runtime_bytes += conditioning[:, :, :1].numel() * runtime_element_size
 
-        total_latent_bytes = per_frame_bytes * total_frames
+        total_latent_bytes = per_frame_runtime_bytes * total_frames
         total_latent_gb = total_latent_bytes / (1024 ** 3)
+        storage_total_bytes = per_frame_storage_bytes * total_frames
+        storage_total_gb = storage_total_bytes / (1024 ** 3)
 
         memory_snapshot = self._get_gpu_memory_snapshot()
         safety = 0.85
@@ -367,14 +374,14 @@ class WanVideoHoloCinePipeline(BasePipeline):
         if available_bytes is not None:
             limit_candidates.append(available_bytes)
         if len(limit_candidates) == 1:
-            effective_limit_bytes = max(per_frame_bytes, limit_candidates[0])
+            effective_limit_bytes = max(per_frame_runtime_bytes, limit_candidates[0])
         elif len(limit_candidates) > 1:
-            effective_limit_bytes = max(per_frame_bytes, min(limit_candidates))
+            effective_limit_bytes = max(per_frame_runtime_bytes, min(limit_candidates))
         else:
-            effective_limit_bytes = max(per_frame_bytes, total_latent_bytes, 1024 ** 3)
+            effective_limit_bytes = max(per_frame_runtime_bytes, total_latent_bytes, 1024 ** 3)
         effective_limit_gb = effective_limit_bytes / (1024 ** 3)
 
-        auto_window = max(1, min(total_frames, effective_limit_bytes // per_frame_bytes))
+        auto_window = max(1, min(total_frames, effective_limit_bytes // max(1, per_frame_runtime_bytes)))
         if window_size is not None:
             sliding_window_size = max(1, min(total_frames, window_size))
         else:
@@ -417,14 +424,18 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 if reason == "":
                     reason = "full latent fits in VRAM"
 
-        window_latent_bytes = per_frame_bytes * (sliding_window_size if use_block_swap else total_frames)
+        window_latent_bytes = per_frame_runtime_bytes * (sliding_window_size if use_block_swap else total_frames)
         window_latent_gb = window_latent_bytes / (1024 ** 3)
+        storage_window_bytes = per_frame_storage_bytes * (sliding_window_size if use_block_swap else total_frames)
+        storage_window_gb = storage_window_bytes / (1024 ** 3)
+        runtime_mb = per_frame_runtime_bytes / (1024 ** 2)
+        storage_mb = per_frame_storage_bytes / (1024 ** 2)
         self.logger.info(
             (
                 f"[BlockSwap] Window estimation: total_frames={total_frames}, "
-                f"per_frame≈{per_frame_bytes / (1024 ** 2):.3f}MB, "
+                f"per_frame≈{runtime_mb:.3f}MB runtime/{storage_mb:.3f}MB storage, "
                 f"window_size={sliding_window_size}, stride={sliding_window_stride}, "
-                f"window_bytes≈{window_latent_bytes / (1024 ** 3):.3f}GB"
+                f"window_bytes≈{window_latent_gb:.3f}GB runtime/{storage_window_gb:.3f}GB storage"
             )
         )
 
@@ -468,13 +479,13 @@ class WanVideoHoloCinePipeline(BasePipeline):
         )
 
         storage_device = offload_device if use_block_swap else torch.device(self.device)
-        storage_dtype = target_dtype if use_block_swap else (self.torch_dtype or latents.dtype)
+        plan_storage_dtype = storage_dtype if use_block_swap else (self.torch_dtype or latents.dtype)
 
         config = None
         if use_block_swap and sliding_window_size < total_frames:
             config = BlockSwapConfig(
                 offload_device=storage_device,
-                offload_dtype=storage_dtype,
+                offload_dtype=plan_storage_dtype,
                 sliding_window_size=sliding_window_size,
                 sliding_window_stride=sliding_window_stride,
                 limit_gb=effective_limit_gb,
@@ -484,10 +495,12 @@ class WanVideoHoloCinePipeline(BasePipeline):
             use_block_swap=use_block_swap,
             config=config,
             storage_device=storage_device,
-            storage_dtype=storage_dtype,
+            storage_dtype=plan_storage_dtype,
             available_gb=available_gb,
             total_latent_gb=total_latent_gb,
             window_latent_gb=window_latent_gb,
+            storage_total_gb=storage_total_gb,
+            storage_window_gb=storage_window_gb,
             model_gb=model_gb,
             window_size=sliding_window_size,
             window_stride=sliding_window_stride,
@@ -515,6 +528,11 @@ class WanVideoHoloCinePipeline(BasePipeline):
 
         self._log_gpu_memory_state("[BlockSwap] Pre-configuration")
 
+        storage_dtype = offload_dtype or latents.dtype
+        runtime_dtype = self.computation_dtype or (latents.dtype if latents is not None else None)
+        if runtime_dtype is None:
+            runtime_dtype = latents.dtype
+
         plan = self._plan_block_swap_strategy(
             latents=latents,
             conditioning=inputs_shared.get("y"),
@@ -522,7 +540,8 @@ class WanVideoHoloCinePipeline(BasePipeline):
             window_size=window_size,
             window_stride=window_stride,
             offload_device=torch.device(offload_device),
-            target_dtype=offload_dtype or latents.dtype,
+            storage_dtype=storage_dtype,
+            runtime_dtype=runtime_dtype,
             prefer_model_offload=prefer_model_offload,
             force_block_swap=force_block_swap,
         )
@@ -531,7 +550,8 @@ class WanVideoHoloCinePipeline(BasePipeline):
             (
                 f"[BlockSwap] Plan decision: use_block_swap={plan.use_block_swap}, "
                 f"reason='{plan.reason or 'n/a'}', window={plan.window_size}, stride={plan.window_stride}, "
-                f"latents_total≈{plan.total_latent_gb:.3f}GB, window≈{plan.window_latent_gb:.3f}GB, "
+                f"latents_total≈{plan.total_latent_gb:.3f}GB runtime/{plan.storage_total_gb:.3f}GB storage, "
+                f"window≈{plan.window_latent_gb:.3f}GB runtime/{plan.storage_window_gb:.3f}GB storage, "
                 f"models≈{plan.model_gb:.3f}GB"
             )
         )
@@ -593,8 +613,8 @@ class WanVideoHoloCinePipeline(BasePipeline):
             f"[BlockSwap] Strategy={'enabled' if plan.use_block_swap else 'disabled'}",
             f"window={plan.window_size}",
             f"stride={plan.window_stride}",
-            f"latents_window≈{plan.window_latent_gb:.2f}GB",
-            f"latents_total≈{plan.total_latent_gb:.2f}GB",
+            f"latents_window≈{plan.window_latent_gb:.2f}GB runtime/{plan.storage_window_gb:.2f}GB storage",
+            f"latents_total≈{plan.total_latent_gb:.2f}GB runtime/{plan.storage_total_gb:.2f}GB storage",
             f"model_mem≈{plan.model_gb:.2f}GB",
         ]
         if plan.available_gb is not None:
