@@ -4,7 +4,7 @@ import math
 import numpy as np
 from PIL import Image
 from einops import repeat, reduce
-from typing import Optional, Union
+from typing import Optional, Union, Tuple
 from dataclasses import dataclass
 from modelscope import snapshot_download
 from einops import rearrange
@@ -26,9 +26,6 @@ from ..schedulers.flow_match import FlowMatchScheduler
 from ..prompters import WanPrompter
 from ..vram_management import enable_vram_management, AutoWrappedModule, AutoWrappedLinear, WanAutoCastLayerNorm
 from ..lora import GeneralLoRALoader
-
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -137,17 +134,21 @@ class WanVideoHoloCinePipeline(BasePipeline):
 
 
     def _log_gpu_memory_state(self, context: str, level: int = logging.DEBUG) -> None:
+        level_name = {
+            logging.CRITICAL: "CRITICAL",
+            logging.ERROR: "ERROR",
+            logging.WARNING: "WARNING",
+            logging.INFO: "INFO",
+            logging.DEBUG: "DEBUG",
+        }.get(level, "INFO")
         snapshot = self._get_gpu_memory_snapshot()
         if snapshot is None:
-            logger.log(level, "%s GPU memory snapshot unavailable", context)
+            print(f"{level_name}: {context} GPU memory snapshot unavailable", flush=True)
             return
-        logger.log(
-            level,
-            "%s GPU memory: free≈%.2fGB, allocated≈%.2fGB, total≈%.2fGB",
-            context,
-            snapshot.free_gb,
-            snapshot.allocated_gb,
-            snapshot.total_gb,
+        print(
+            f"{level_name}: {context} GPU memory: free≈{snapshot.free_gb:.2f}GB, "
+            f"allocated≈{snapshot.allocated_gb:.2f}GB, total≈{snapshot.total_gb:.2f}GB",
+            flush=True,
         )
 
 
@@ -174,8 +175,13 @@ class WanVideoHoloCinePipeline(BasePipeline):
         window = max(1, available_bytes // per_frame_bytes)
         return window
 
-    def _get_gpu_memory_snapshot(self) -> Optional[GPUMemorySnapshot]:
-        device = torch.device(self.device)
+    def _get_gpu_memory_snapshot(
+        self, device: Optional[Union[str, torch.device]] = None
+    ) -> Optional[GPUMemorySnapshot]:
+        if device is None:
+            device = torch.device(self.device)
+        elif not isinstance(device, torch.device):
+            device = torch.device(device)
         if device.type != "cuda" or not torch.cuda.is_available():
             return None
         try:
@@ -263,12 +269,11 @@ class WanVideoHoloCinePipeline(BasePipeline):
 
         window_latent_bytes = per_frame_bytes * (sliding_window_size if use_block_swap else total_frames)
         window_latent_gb = window_latent_bytes / (1024 ** 3)
-        logger.debug(
-            "[BlockSwap] Window estimation: total_frames=%d, per_frame≈%.3fMB, window_size=%d, stride=%d",
-            total_frames,
-            per_frame_bytes / (1024 ** 2),
-            sliding_window_size,
-            sliding_window_stride,
+        print(
+            f"[BlockSwap] Window estimation: total_frames={total_frames}, "
+            f"per_frame≈{per_frame_bytes / (1024 ** 2):.3f}MB, "
+            f"window_size={sliding_window_size}, stride={sliding_window_stride}",
+            flush=True,
         )
 
         model_bytes = self._estimate_iteration_model_bytes()
@@ -349,11 +354,9 @@ class WanVideoHoloCinePipeline(BasePipeline):
 
         latents = latents.to(device=storage_device, dtype=storage_dtype)
         inputs_shared["latents"] = latents
-        logger.info(
-            "[BlockSwap] Latents moved to %s (%s) with shape=%s",
-            storage_device,
-            storage_dtype,
-            tuple(latents.shape),
+        print(
+            f"[BlockSwap] Latents moved to {storage_device} ({storage_dtype}) with shape={tuple(latents.shape)}",
+            flush=True,
         )
 
         heavy_tensor_keys = [
@@ -368,12 +371,10 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 tensor = inputs_shared.get(key)
                 if tensor is not None and isinstance(tensor, torch.Tensor):
                     inputs_shared[key] = tensor.to(device=storage_device, dtype=storage_dtype)
-                    logger.debug(
-                        "[BlockSwap] %s moved to %s (%s) with shape=%s",
-                        key,
-                        storage_device,
-                        storage_dtype,
-                        tuple(inputs_shared[key].shape),
+                    print(
+                        f"[BlockSwap] {key} moved to {storage_device} ({storage_dtype}) with "
+                        f"shape={tuple(inputs_shared[key].shape)}",
+                        flush=True,
                     )
 
         self.cpu_offload = self.cpu_offload or plan.offload_models
@@ -381,7 +382,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
             self.enable_vram_management(vram_limit=plan.vram_limit_gb)
             self._auto_vram_management_applied = True
             limit_display = f"{plan.vram_limit_gb:.2f}GB" if plan.vram_limit_gb is not None else "unbounded"
-            logger.info("[BlockSwap] Enabled VRAM management with limit=%s", limit_display)
+            print(f"[BlockSwap] Enabled VRAM management with limit={limit_display}", flush=True)
 
         self._auto_memory_plan = plan
 
@@ -398,12 +399,8 @@ class WanVideoHoloCinePipeline(BasePipeline):
         summary_parts.append(f"offload_models={'yes' if plan.offload_models else 'no'}")
         if plan.reason:
             summary_parts.append(f"reason={plan.reason}")
-        logger.info(
-            "%s",
-            ", ".join(summary_parts),
-        )
+        print(", ".join(summary_parts), flush=True)
         self._log_gpu_memory_state("[BlockSwap] Post-configuration")
-        print(", ".join(summary_parts))
 
         return plan.config if plan.use_block_swap else None
 
@@ -875,13 +872,11 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 )
                 inputs_shared["latents"] = latents_tensor
                 latent_bytes = latents_tensor.numel() * latents_tensor.element_size()
-                logger.info(
-                    "[BlockSwap] Iteration %d/%d offloaded latents to %s (%s) size≈%.2fGB",
-                    progress_id + 1,
-                    num_progress_steps,
-                    block_swap_config.offload_device,
-                    block_swap_config.offload_dtype,
-                    latent_bytes / (1024 ** 3),
+                print(
+                    f"[BlockSwap] Iteration {progress_id + 1}/{num_progress_steps} "
+                    f"offloaded latents to {block_swap_config.offload_device} "
+                    f"({block_swap_config.offload_dtype}) size≈{latent_bytes / (1024 ** 3):.2f}GB",
+                    flush=True,
                 )
                 self._log_gpu_memory_state(
                     f"[BlockSwap] After iteration {progress_id + 1}/{num_progress_steps}",
@@ -1397,6 +1392,57 @@ class TemporalTiler_BCTHW:
         message = str(error).lower()
         return "out of memory" in message or "cuda error" in message
 
+    def _adjust_window_to_available_vram(
+        self,
+        window_total_bytes: int,
+        current_window_size: int,
+        computation_device,
+    ) -> Tuple[int, Optional[str], Optional[GPUMemorySnapshot]]:
+        candidate_size = current_window_size
+        reason_parts = []
+        plan = getattr(self, "_auto_memory_plan", None)
+        plan_limit_gb = getattr(plan, "effective_limit_gb", None) if plan is not None else None
+        limit_bytes = None
+        if plan_limit_gb is not None:
+            limit_bytes = int(plan_limit_gb * (1024 ** 3))
+        snapshot: Optional[GPUMemorySnapshot] = None
+        free_budget_bytes: Optional[int] = None
+        if (
+            isinstance(computation_device, torch.device)
+            and computation_device.type == "cuda"
+            and torch.cuda.is_available()
+        ):
+            snapshot = self._get_gpu_memory_snapshot(computation_device)
+            if snapshot is not None:
+                free_budget_bytes = int(snapshot.free_bytes * 0.9)
+                if free_budget_bytes <= 0:
+                    free_budget_bytes = snapshot.free_bytes
+        if limit_bytes is not None and window_total_bytes > limit_bytes:
+            target_bytes = max(1, int(limit_bytes * 0.95))
+            ratio = target_bytes / max(1, window_total_bytes)
+            candidate_size = max(1, int(current_window_size * ratio))
+            if candidate_size >= current_window_size and current_window_size > 1:
+                candidate_size = current_window_size - 1
+            reason_parts.append(f"plan limit {plan_limit_gb:.2f}GB")
+        if free_budget_bytes is not None and window_total_bytes > free_budget_bytes:
+            ratio = free_budget_bytes / max(1, window_total_bytes)
+            reduced = max(1, int(current_window_size * ratio))
+            if reduced >= current_window_size and current_window_size > 1:
+                reduced = current_window_size - 1
+            if reduced < candidate_size:
+                candidate_size = reduced
+            elif reduced > candidate_size:
+                candidate_size = min(candidate_size, reduced)
+            reason_parts.append(f"free VRAM≈{snapshot.free_gb:.2f}GB")
+        if candidate_size > current_window_size:
+            candidate_size = current_window_size
+        reason = " & ".join(reason_parts) if reason_parts else None
+        if reason is not None and candidate_size == current_window_size and current_window_size > 1:
+            candidate_size = current_window_size - 1
+        if candidate_size < 1:
+            candidate_size = 1
+        return candidate_size, reason, snapshot
+
     def build_1d_mask(self, length, left_bound, right_bound, border_width):
         x = torch.ones((length,))
         if border_width == 0:
@@ -1462,68 +1508,85 @@ class TemporalTiler_BCTHW:
         current_window_size = sliding_window_size
         current_stride = max(1, min(sliding_window_stride, current_window_size))
         total_windows = self._estimate_total_windows(T, current_window_size, current_stride)
-        logger.info(
-            "[BlockSwap] Sliding window execution: windows=%d, size=%d, stride=%d, tensors=%s",
-            total_windows,
-            current_window_size,
-            current_stride,
-            ",".join(tensor_names),
+        print(
+            f"[BlockSwap] Sliding window execution: windows={total_windows}, size={current_window_size}, "
+            f"stride={current_stride}, tensors={','.join(tensor_names)}",
+            flush=True,
         )
         window_index = 0
         min_window_size_used = current_window_size
         max_window_size_used = current_window_size
         t = 0
+        dtype_element_size = torch.empty((), dtype=computation_dtype).element_size()
         while t < T:
+            while True:
+                window_size = min(current_window_size, T - t)
+                t_end = t + window_size
+                tensor_slices = []
+                window_total_bytes = 0
+                for tensor_name in tensor_names:
+                    tensor_slice = slice_time_dimension(tensor_dict[tensor_name])
+                    tensor_slices.append((tensor_name, tensor_slice))
+                    window_total_bytes += tensor_slice.numel() * dtype_element_size
+                adjusted_size, adjustment_reason, snapshot = self._adjust_window_to_available_vram(
+                    window_total_bytes,
+                    current_window_size,
+                    computation_device,
+                )
+                if (
+                    adjustment_reason is not None
+                    and adjusted_size < current_window_size
+                    and current_window_size > 1
+                ):
+                    print(
+                        f"[BlockSwap] Shrinking window frames[{t}:{t_end}) from {current_window_size} "
+                        f"to {adjusted_size} due to {adjustment_reason}",
+                        flush=True,
+                    )
+                    current_window_size = adjusted_size
+                    current_stride = max(1, min(sliding_window_stride, current_window_size))
+                    total_windows = self._estimate_total_windows(T, current_window_size, current_stride)
+                    print(
+                        f"[BlockSwap] Updated sliding window parameters: windows={total_windows}, "
+                        f"size={current_window_size}, stride={current_stride}",
+                        flush=True,
+                    )
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    continue
+                break
             window_size = min(current_window_size, T - t)
             t_end = t + window_size
             updated_tensors = {}
-            window_total_bytes = 0
-            for tensor_name in tensor_names:
-                tensor_slice = slice_time_dimension(tensor_dict[tensor_name])
-                updated_tensor = tensor_slice.to(device=computation_device, dtype=computation_dtype)
-                updated_tensors[tensor_name] = updated_tensor
-                window_total_bytes += updated_tensor.numel() * updated_tensor.element_size()
-            if isinstance(computation_device, torch.device) and computation_device.type == "cuda" and torch.cuda.is_available():
-                try:
-                    free_bytes, total_bytes = torch.cuda.mem_get_info(computation_device)
-                    allocated_bytes = torch.cuda.memory_allocated(computation_device)
-                    snapshot = GPUMemorySnapshot(total_bytes=total_bytes, free_bytes=free_bytes, allocated_bytes=allocated_bytes)
-                    logger.info(
-                        "[BlockSwap] Swapping window %d/%d frames[%d:%d) size=%d (≈%.2fGB) -> %s (%s) | free≈%.2fGB allocated≈%.2fGB",
-                        window_index + 1,
-                        total_windows,
-                        t,
-                        t_end,
-                        window_size,
-                        window_total_bytes / (1024 ** 3),
-                        computation_device,
-                        computation_dtype,
-                        snapshot.free_gb,
-                        snapshot.allocated_gb,
-                    )
-                except RuntimeError:
-                    logger.info(
-                        "[BlockSwap] Swapping window %d/%d frames[%d:%d) size=%d (≈%.2fGB) -> %s (%s) | GPU stats unavailable",
-                        window_index + 1,
-                        total_windows,
-                        t,
-                        t_end,
-                        window_size,
-                        window_total_bytes / (1024 ** 3),
-                        computation_device,
-                        computation_dtype,
-                    )
+            for tensor_name, tensor_slice in tensor_slices:
+                updated_tensors[tensor_name] = tensor_slice.to(
+                    device=computation_device, dtype=computation_dtype
+                )
+            window_total_bytes = sum(
+                updated_tensors[name].numel() * updated_tensors[name].element_size()
+                for name in tensor_names
+            )
+            snapshot = None
+            if (
+                isinstance(computation_device, torch.device)
+                and computation_device.type == "cuda"
+                and torch.cuda.is_available()
+            ):
+                snapshot = self._get_gpu_memory_snapshot(computation_device)
+            if snapshot is not None:
+                print(
+                    f"[BlockSwap] Swapping window {window_index + 1}/{total_windows} "
+                    f"frames[{t}:{t_end}) size={window_size} (≈{window_total_bytes / (1024 ** 3):.2f}GB) "
+                    f"-> {computation_device} ({computation_dtype}) | free≈{snapshot.free_gb:.2f}GB "
+                    f"allocated≈{snapshot.allocated_gb:.2f}GB",
+                    flush=True,
+                )
             else:
-                logger.info(
-                    "[BlockSwap] Swapping window %d/%d frames[%d:%d) size=%d (≈%.2fGB) -> %s (%s)",
-                    window_index + 1,
-                    total_windows,
-                    t,
-                    t_end,
-                    window_size,
-                    window_total_bytes / (1024 ** 3),
-                    computation_device,
-                    computation_dtype,
+                print(
+                    f"[BlockSwap] Swapping window {window_index + 1}/{total_windows} "
+                    f"frames[{t}:{t_end}) size={window_size} (≈{window_total_bytes / (1024 ** 3):.2f}GB) "
+                    f"-> {computation_device} ({computation_dtype})",
+                    flush=True,
                 )
             try:
                 call_kwargs = dict(static_kwargs)
@@ -1535,23 +1598,20 @@ class TemporalTiler_BCTHW:
                 new_window_size = max(1, current_window_size // 2)
                 if new_window_size == current_window_size:
                     raise
-                logger.warning(
-                    "[BlockSwap] OOM detected for window frames[%d:%d); reducing window size from %d to %d",
-                    t,
-                    t_end,
-                    current_window_size,
-                    new_window_size,
+                print(
+                    f"WARNING: [BlockSwap] OOM detected for window frames[{t}:{t_end}); "
+                    f"reducing window size from {current_window_size} to {new_window_size}",
+                    flush=True,
                 )
                 current_window_size = new_window_size
                 current_stride = max(1, min(sliding_window_stride, current_window_size))
                 total_windows = self._estimate_total_windows(T, current_window_size, current_stride)
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                logger.info(
-                    "[BlockSwap] Updated sliding window parameters: windows=%d, size=%d, stride=%d",
-                    total_windows,
-                    current_window_size,
-                    current_stride,
+                print(
+                    f"[BlockSwap] Updated sliding window parameters: windows={total_windows}, "
+                    f"size={current_window_size}, stride={current_stride}",
+                    flush=True,
                 )
                 del updated_tensors
                 continue
@@ -1568,11 +1628,10 @@ class TemporalTiler_BCTHW:
             min_window_size_used = min(min_window_size_used, window_size)
             max_window_size_used = max(max_window_size_used, window_size)
             t += current_stride
-        logger.info(
-            "[BlockSwap] Sliding window execution complete: processed %d windows (window_size range=%d-%d)",
-            window_index,
-            min_window_size_used,
-            max_window_size_used,
+        print(
+            f"[BlockSwap] Sliding window execution complete: processed {window_index} windows "
+            f"(window_size range={min_window_size_used}-{max_window_size_used})",
+            flush=True,
         )
         value /= weight
         return value
