@@ -1,11 +1,15 @@
 import pathlib
 import sys
 
+import pytest
 import torch
 
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
-from diffsynth.pipelines.wan_video_holocine import WanVideoHoloCinePipeline
+from diffsynth.pipelines.wan_video_holocine import (
+    TemporalTiler_BCTHW,
+    WanVideoHoloCinePipeline,
+)
 from diffsynth.vram_management.layers import AutoWrappedLinear
 
 
@@ -49,3 +53,28 @@ def test_auto_wrapped_linear_casts_fp8_weights_for_linear():
     x_fp8 = torch.randn(2, 4).to(dtype=torch.float8_e4m3fn)
     out_fp8 = wrapper(x_fp8)
     assert out_fp8.dtype == torch.float16
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 not supported")
+def test_temporal_tiler_accumulates_in_runtime_dtype_before_downcasting():
+    latents = torch.zeros((1, 2, 4, 3, 3), dtype=torch.float8_e4m3fn)
+
+    tiler = TemporalTiler_BCTHW()
+
+    def model_fn(latents):
+        assert latents.dtype == torch.float16
+        return torch.ones_like(latents, dtype=torch.float16)
+
+    output = tiler.run(
+        model_fn,
+        sliding_window_size=2,
+        sliding_window_stride=2,
+        computation_device="cpu",
+        computation_dtype=torch.float16,
+        model_kwargs={"latents": latents},
+        tensor_names=["latents"],
+    )
+
+    assert output.dtype == torch.float8_e4m3fn
+    assert output.device == latents.device
+    assert torch.allclose(output.to(dtype=torch.float16), torch.ones_like(latents, dtype=torch.float16))

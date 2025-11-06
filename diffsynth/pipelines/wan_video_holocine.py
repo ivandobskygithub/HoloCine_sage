@@ -1769,11 +1769,14 @@ class TemporalTiler_BCTHW:
         B, C, T, H, W = tensor_dict[tensor_names[0]].shape
         if batch_size is not None:
             B *= batch_size
-        data_device, data_dtype = tensor_dict[tensor_names[0]].device, tensor_dict[tensor_names[0]].dtype
+        storage_device = tensor_dict[tensor_names[0]].device
+        storage_dtype = tensor_dict[tensor_names[0]].dtype
         if computation_device is None:
-            computation_device = data_device
+            computation_device = storage_device
         if computation_dtype is None:
-            computation_dtype = data_dtype
+            computation_dtype = storage_dtype
+        value_device = computation_device
+        value_dtype = computation_dtype
 
         def slice_time_dimension(tensor: torch.Tensor) -> torch.Tensor:
             if tensor.shape == ():
@@ -1788,8 +1791,8 @@ class TemporalTiler_BCTHW:
             dim = 2 if tensor.ndim > 2 else tensor.ndim - 1
             indexer[dim] = slice(t, t_end)
             return tensor[tuple(indexer)]
-        value = torch.zeros((B, C, T, H, W), device=data_device, dtype=data_dtype)
-        weight = torch.zeros((1, 1, T, 1, 1), device=data_device, dtype=data_dtype)
+        value = torch.zeros((B, C, T, H, W), device=value_device, dtype=value_dtype)
+        weight = torch.zeros((1, 1, T, 1, 1), device=value_device, dtype=value_dtype)
         current_window_size = sliding_window_size
         current_stride = max(1, min(sliding_window_stride, current_window_size))
         total_windows = self._estimate_total_windows(T, current_window_size, current_stride)
@@ -1803,7 +1806,7 @@ class TemporalTiler_BCTHW:
         min_window_size_used = current_window_size
         max_window_size_used = current_window_size
         t = 0
-        dtype_element_size = torch.empty((), dtype=computation_dtype).element_size()
+        dtype_element_size = torch.empty((), dtype=value_dtype).element_size()
         while t < T:
             while True:
                 window_size = min(current_window_size, T - t)
@@ -1881,7 +1884,7 @@ class TemporalTiler_BCTHW:
             try:
                 call_kwargs = dict(static_kwargs)
                 call_kwargs.update(updated_tensors)
-                model_output = model_fn(**call_kwargs).to(device=data_device, dtype=data_dtype)
+                model_output = model_fn(**call_kwargs).to(device=value_device, dtype=value_dtype)
             except RuntimeError as error:
                 if not self._is_oom_error(error) or current_window_size == 1:
                     raise
@@ -1912,7 +1915,7 @@ class TemporalTiler_BCTHW:
                 model_output,
                 is_bound=(t == 0, t_end == T),
                 border_width=(border_width,)
-            ).to(device=data_device, dtype=data_dtype)
+            ).to(device=value_device, dtype=value_dtype)
             value[:, :, t:t_end, :, :] += model_output * mask
             weight[:, :, t:t_end, :, :] += mask
             del updated_tensors
@@ -1927,6 +1930,10 @@ class TemporalTiler_BCTHW:
             )
         )
         value /= weight
+        storage_device_cmp = torch.device(storage_device) if isinstance(storage_device, str) else storage_device
+        value_device_cmp = torch.device(value_device) if isinstance(value_device, str) else value_device
+        if value_device_cmp != storage_device_cmp or value_dtype != storage_dtype:
+            value = value.to(device=storage_device, dtype=storage_dtype)
         return value
 
 
