@@ -122,6 +122,12 @@ class WanVideoHoloCinePipeline(BasePipeline):
             device=device, torch_dtype=torch_dtype,
             height_division_factor=16, width_division_factor=16, time_division_factor=4, time_division_remainder=1
         )
+        # ``BasePipeline`` definitions differ across packages; some initialize ``cpu_offload``
+        # while others rely solely on VRAM management flags.  Ensure the attribute exists so
+        # later logic that toggles CPU offload remains compatible regardless of the base class
+        # version we inherit from.
+        if not hasattr(self, "cpu_offload"):
+            self.cpu_offload = False
         self.logger = self._configure_blockswap_logger()
         self.scheduler = FlowMatchScheduler(shift=5, sigma_min=0.0, extra_one_step=True)
         self.prompter = WanPrompter(tokenizer_path=tokenizer_path)
