@@ -2016,14 +2016,28 @@ def model_fn_wan_video(
                             s0 = int(s0); s1 = int(s1)
                             shot_table[sid, s0:s1+1] = True
 
-                        vid_shot = shot_indices.repeat_interleave(h * w, dim=1)
+                        frame_shot_indices = shot_indices
+                        if frame_shot_indices.dim() > 2:
+                            frame_shot_indices = frame_shot_indices.reshape(frame_shot_indices.shape[0], -1)
+                        frame_shot_indices = frame_shot_indices.to(device=device, dtype=torch.long)
 
+                        allow_shot = shot_table[frame_shot_indices]
 
-                        allow_shot = shot_table[vid_shot]           
+                        if allow_shot.shape[0] != B:
+                            allow_shot = allow_shot.expand(B, -1, -1)
+
+                        tokens_per_frame = h * w if h is not None and w is not None else None
+                        if tokens_per_frame and allow_shot.shape[1] * tokens_per_frame == S_q:
+                            allow_shot = allow_shot.repeat_interleave(tokens_per_frame, dim=1)
+                        elif allow_shot.shape[1] != S_q:
+                            base = max(allow_shot.shape[1], 1)
+                            repeat_factor = math.ceil(S_q / base)
+                            allow_shot = allow_shot.repeat_interleave(repeat_factor, dim=1)[..., :S_q, :]
+
                         allow = allow_shot | global_mask.view(1, 1, L_text_ctx)
                     else:
                         allow = global_mask.view(1, 1, L_text_ctx)
-                    
+
                     pad_mask = torch.zeros(L_text_ctx, dtype=torch.bool, device=device)
                     if L_text_pos < L_text_ctx:
                         pad_mask[L_text_pos:] = True
