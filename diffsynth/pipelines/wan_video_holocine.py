@@ -1,4 +1,6 @@
 import torch, warnings, glob, os, types
+import logging
+import math
 import numpy as np
 from PIL import Image
 from einops import repeat, reduce
@@ -24,6 +26,9 @@ from ..schedulers.flow_match import FlowMatchScheduler
 from ..prompters import WanPrompter
 from ..vram_management import enable_vram_management, AutoWrappedModule, AutoWrappedLinear, WanAutoCastLayerNorm
 from ..lora import GeneralLoRALoader
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -129,6 +134,21 @@ class WanVideoHoloCinePipeline(BasePipeline):
         loader = GeneralLoRALoader(torch_dtype=self.torch_dtype, device=self.device)
         lora = load_state_dict(path, torch_dtype=self.torch_dtype, device=self.device)
         loader.load(module, lora, alpha=alpha)
+
+
+    def _log_gpu_memory_state(self, context: str, level: int = logging.DEBUG) -> None:
+        snapshot = self._get_gpu_memory_snapshot()
+        if snapshot is None:
+            logger.log(level, "%s GPU memory snapshot unavailable", context)
+            return
+        logger.log(
+            level,
+            "%s GPU memory: free≈%.2fGB, allocated≈%.2fGB, total≈%.2fGB",
+            context,
+            snapshot.free_gb,
+            snapshot.allocated_gb,
+            snapshot.total_gb,
+        )
 
 
     def _estimate_block_swap_window(
@@ -243,6 +263,13 @@ class WanVideoHoloCinePipeline(BasePipeline):
 
         window_latent_bytes = per_frame_bytes * (sliding_window_size if use_block_swap else total_frames)
         window_latent_gb = window_latent_bytes / (1024 ** 3)
+        logger.debug(
+            "[BlockSwap] Window estimation: total_frames=%d, per_frame≈%.3fMB, window_size=%d, stride=%d",
+            total_frames,
+            per_frame_bytes / (1024 ** 2),
+            sliding_window_size,
+            sliding_window_stride,
+        )
 
         model_bytes = self._estimate_iteration_model_bytes()
         model_gb = model_bytes / (1024 ** 3)
@@ -305,6 +332,8 @@ class WanVideoHoloCinePipeline(BasePipeline):
             warnings.warn("Block swap requested but no latents tensor is available; ignoring request.")
             return None
 
+        self._log_gpu_memory_state("[BlockSwap] Pre-configuration")
+
         plan = self._plan_block_swap_strategy(
             latents=latents,
             conditioning=inputs_shared.get("y"),
@@ -320,6 +349,12 @@ class WanVideoHoloCinePipeline(BasePipeline):
 
         latents = latents.to(device=storage_device, dtype=storage_dtype)
         inputs_shared["latents"] = latents
+        logger.info(
+            "[BlockSwap] Latents moved to %s (%s) with shape=%s",
+            storage_device,
+            storage_dtype,
+            tuple(latents.shape),
+        )
 
         heavy_tensor_keys = [
             "y",
@@ -333,11 +368,20 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 tensor = inputs_shared.get(key)
                 if tensor is not None and isinstance(tensor, torch.Tensor):
                     inputs_shared[key] = tensor.to(device=storage_device, dtype=storage_dtype)
+                    logger.debug(
+                        "[BlockSwap] %s moved to %s (%s) with shape=%s",
+                        key,
+                        storage_device,
+                        storage_dtype,
+                        tuple(inputs_shared[key].shape),
+                    )
 
         self.cpu_offload = self.cpu_offload or plan.offload_models
         if plan.offload_models and not self.vram_management_enabled and not self._auto_vram_management_applied:
             self.enable_vram_management(vram_limit=plan.vram_limit_gb)
             self._auto_vram_management_applied = True
+            limit_display = f"{plan.vram_limit_gb:.2f}GB" if plan.vram_limit_gb is not None else "unbounded"
+            logger.info("[BlockSwap] Enabled VRAM management with limit=%s", limit_display)
 
         self._auto_memory_plan = plan
 
@@ -354,6 +398,11 @@ class WanVideoHoloCinePipeline(BasePipeline):
         summary_parts.append(f"offload_models={'yes' if plan.offload_models else 'no'}")
         if plan.reason:
             summary_parts.append(f"reason={plan.reason}")
+        logger.info(
+            "%s",
+            ", ".join(summary_parts),
+        )
+        self._log_gpu_memory_state("[BlockSwap] Post-configuration")
         print(", ".join(summary_parts))
 
         return plan.config if plan.use_block_swap else None
@@ -794,15 +843,16 @@ class WanVideoHoloCinePipeline(BasePipeline):
         # Denoise
         self.load_models_to_device(self.in_iteration_models)
         models = {name: getattr(self, name) for name in self.in_iteration_models}
+        num_progress_steps = len(self.scheduler.timesteps)
         for progress_id, timestep in enumerate(progress_bar_cmd(self.scheduler.timesteps)):
             # Switch DiT if necessary
             if timestep.item() < switch_DiT_boundary * self.scheduler.num_train_timesteps and self.dit2 is not None and not models["dit"] is self.dit2:
                 self.load_models_to_device(self.in_iteration_models_2)
                 models["dit"] = self.dit2
-                
+
             # Timestep
             timestep = timestep.unsqueeze(0).to(dtype=self.torch_dtype, device=self.device)
-            
+
             # Inference
             noise_pred_posi = self.model_fn(**models, **inputs_shared, **inputs_posi, timestep=timestep)
             if cfg_scale != 1.0:
@@ -819,9 +869,18 @@ class WanVideoHoloCinePipeline(BasePipeline):
             if "first_frame_latents" in inputs_shared:
                 inputs_shared["latents"][:, :, 0:1] = inputs_shared["first_frame_latents"]
             if block_swap_config is not None:
+                logger.debug(
+                    "[BlockSwap] Iteration %d/%d complete, preparing to offload latents",
+                    progress_id + 1,
+                    num_progress_steps,
+                )
                 inputs_shared["latents"] = inputs_shared["latents"].to(
                     device=block_swap_config.offload_device,
                     dtype=block_swap_config.offload_dtype,
+                )
+                self._log_gpu_memory_state(
+                    f"[BlockSwap] After iteration {progress_id + 1}/{num_progress_steps}",
+                    level=logging.INFO,
                 )
 
         # VACE (TODO: remove it)
@@ -1371,14 +1430,59 @@ class TemporalTiler_BCTHW:
             computation_dtype = data_dtype
         value = torch.zeros((B, C, T, H, W), device=data_device, dtype=data_dtype)
         weight = torch.zeros((1, 1, T, 1, 1), device=data_device, dtype=data_dtype)
+        total_windows = max(1, math.ceil(max(0, T - sliding_window_size) / max(1, sliding_window_stride)) + 1)
+        logger.info(
+            "[BlockSwap] Sliding window execution: windows=%d, size=%d, stride=%d, tensors=%s",
+            total_windows,
+            sliding_window_size,
+            sliding_window_stride,
+            ",".join(tensor_names),
+        )
+        window_index = 0
         for t in range(0, T, sliding_window_stride):
             if t - sliding_window_stride >= 0 and t - sliding_window_stride + sliding_window_size >= T:
                 continue
             t_ = min(t + sliding_window_size, T)
-            model_kwargs.update({
-                tensor_name: tensor_dict[tensor_name][:, :, t: t_:, :].to(device=computation_device, dtype=computation_dtype) \
-                    for tensor_name in tensor_names
-            })
+            window_index += 1
+            updated_tensors = {}
+            for tensor_name in tensor_names:
+                tensor_slice = tensor_dict[tensor_name][:, :, t:t_, :]
+                updated_tensors[tensor_name] = tensor_slice.to(device=computation_device, dtype=computation_dtype)
+            model_kwargs.update(updated_tensors)
+            if isinstance(computation_device, torch.device) and computation_device.type == "cuda" and torch.cuda.is_available():
+                try:
+                    free_bytes, total_bytes = torch.cuda.mem_get_info(computation_device)
+                    allocated_bytes = torch.cuda.memory_allocated(computation_device)
+                    snapshot = GPUMemorySnapshot(total_bytes=total_bytes, free_bytes=free_bytes, allocated_bytes=allocated_bytes)
+                    logger.debug(
+                        "[BlockSwap] Window %d/%d frames[%d:%d) on %s (%s) | free≈%.2fGB allocated≈%.2fGB",
+                        window_index,
+                        total_windows,
+                        t,
+                        t_,
+                        computation_device,
+                        computation_dtype,
+                        snapshot.free_gb,
+                        snapshot.allocated_gb,
+                    )
+                except RuntimeError:
+                    logger.debug(
+                        "[BlockSwap] Window %d/%d frames[%d:%d) GPU stats unavailable",
+                        window_index,
+                        total_windows,
+                        t,
+                        t_,
+                    )
+            else:
+                logger.debug(
+                    "[BlockSwap] Window %d/%d frames[%d:%d) on %s (%s)",
+                    window_index,
+                    total_windows,
+                    t,
+                    t_,
+                    computation_device,
+                    computation_dtype,
+                )
             model_output = model_fn(**model_kwargs).to(device=data_device, dtype=data_dtype)
             mask = self.build_mask(
                 model_output,
@@ -1387,6 +1491,7 @@ class TemporalTiler_BCTHW:
             ).to(device=data_device, dtype=data_dtype)
             value[:, :, t: t_, :, :] += model_output * mask
             weight[:, :, t: t_, :, :] += mask
+        logger.info("[BlockSwap] Sliding window execution complete: processed %d windows", window_index)
         value /= weight
         model_kwargs.update(tensor_dict)
         return value
