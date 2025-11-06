@@ -7,7 +7,7 @@ import types
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Callable, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -514,7 +514,13 @@ class WanVideoHoloCinePipeline(BasePipeline):
 
         
         
-        noise_pred = self.model_fn(**inputs, timestep=timestep)
+        noise_pred = self.model_fn(
+            **inputs,
+            timestep=timestep,
+            logger=self.logger,
+            auto_memory_plan=getattr(self, "_auto_memory_plan", None),
+            gpu_memory_snapshot_fn=self._get_gpu_memory_snapshot,
+        )
         
         loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float())
         loss = loss * self.scheduler.training_weight(timestep)
@@ -949,12 +955,28 @@ class WanVideoHoloCinePipeline(BasePipeline):
             timestep = timestep.unsqueeze(0).to(dtype=self.torch_dtype, device=self.device)
 
             # Inference
-            noise_pred_posi = self.model_fn(**models, **inputs_shared, **inputs_posi, timestep=timestep)
+            noise_pred_posi = self.model_fn(
+                **models,
+                **inputs_shared,
+                **inputs_posi,
+                timestep=timestep,
+                logger=self.logger,
+                auto_memory_plan=getattr(self, "_auto_memory_plan", None),
+                gpu_memory_snapshot_fn=self._get_gpu_memory_snapshot,
+            )
             if cfg_scale != 1.0:
                 if cfg_merge:
                     noise_pred_posi, noise_pred_nega = noise_pred_posi.chunk(2, dim=0)
                 else:
-                    noise_pred_nega = self.model_fn(**models, **inputs_shared, **inputs_nega, timestep=timestep)
+                    noise_pred_nega = self.model_fn(
+                        **models,
+                        **inputs_shared,
+                        **inputs_nega,
+                        timestep=timestep,
+                        logger=self.logger,
+                        auto_memory_plan=getattr(self, "_auto_memory_plan", None),
+                        gpu_memory_snapshot_fn=self._get_gpu_memory_snapshot,
+                    )
                 noise_pred = noise_pred_nega + cfg_scale * (noise_pred_posi - noise_pred_nega)
             else:
                 noise_pred = noise_pred_posi
@@ -1479,8 +1501,17 @@ class TeaCache:
 
 
 class TemporalTiler_BCTHW:
-    def __init__(self, logger: Optional[logging.Logger] = None):
+    def __init__(
+        self,
+        logger: Optional[logging.Logger] = None,
+        auto_memory_plan: Optional[BlockSwapPlan] = None,
+        gpu_memory_snapshot_fn: Optional[
+            Callable[[Optional[Union[str, torch.device]]], Optional[GPUMemorySnapshot]]
+        ] = None,
+    ):
         self.logger = logger or logging.getLogger(BLOCK_SWAP_LOGGER_NAME)
+        self._auto_memory_plan = auto_memory_plan
+        self._gpu_memory_snapshot_fn = gpu_memory_snapshot_fn
 
     def _log(self, level: int, message: str) -> None:
         if self.logger is not None and self.logger.handlers:
@@ -1511,23 +1542,27 @@ class TemporalTiler_BCTHW:
     ) -> Tuple[int, Optional[str], Optional[GPUMemorySnapshot]]:
         candidate_size = current_window_size
         reason_parts = []
-        plan = getattr(self, "_auto_memory_plan", None)
+        plan = self._auto_memory_plan
         plan_limit_gb = getattr(plan, "effective_limit_gb", None) if plan is not None else None
         limit_bytes = None
         if plan_limit_gb is not None:
             limit_bytes = int(plan_limit_gb * (1024 ** 3))
         snapshot: Optional[GPUMemorySnapshot] = None
         free_budget_bytes: Optional[int] = None
-        if (
-            isinstance(computation_device, torch.device)
-            and computation_device.type == "cuda"
-            and torch.cuda.is_available()
-        ):
-            snapshot = self._get_gpu_memory_snapshot(computation_device)
-            if snapshot is not None:
-                free_budget_bytes = int(snapshot.free_bytes * 0.9)
-                if free_budget_bytes <= 0:
-                    free_budget_bytes = snapshot.free_bytes
+        if self._gpu_memory_snapshot_fn is not None:
+            target_device = computation_device
+            if target_device is not None and not isinstance(target_device, torch.device):
+                target_device = torch.device(target_device)
+            if (
+                isinstance(target_device, torch.device)
+                and target_device.type == "cuda"
+                and torch.cuda.is_available()
+            ):
+                snapshot = self._gpu_memory_snapshot_fn(target_device)
+        if snapshot is not None:
+            free_budget_bytes = int(snapshot.free_bytes * 0.9)
+            if free_budget_bytes <= 0:
+                free_budget_bytes = snapshot.free_bytes
         if limit_bytes is not None and window_total_bytes > limit_bytes:
             target_bytes = max(1, int(limit_bytes * 0.95))
             ratio = target_bytes / max(1, window_total_bytes)
@@ -1784,6 +1819,11 @@ def model_fn_wan_video(
     text_cut_positions: Optional[torch.Tensor] = None,
     computation_device: Optional[torch.device] = None,
     computation_dtype: Optional[torch.dtype] = None,
+    logger: Optional[logging.Logger] = None,
+    auto_memory_plan: Optional[BlockSwapPlan] = None,
+    gpu_memory_snapshot_fn: Optional[
+        Callable[[Optional[Union[str, torch.device]]], Optional[GPUMemorySnapshot]]
+    ] = None,
     **kwargs,
 ):
     if sliding_window_size is not None and sliding_window_stride is not None:
@@ -1805,10 +1845,15 @@ def model_fn_wan_video(
             shot_indices=shot_indices,
             shot_mask_type=shot_mask_type,
             text_cut_positions=text_cut_positions,
+            logger=logger,
+            auto_memory_plan=auto_memory_plan,
+            gpu_memory_snapshot_fn=gpu_memory_snapshot_fn,
         )
-        tiler = TemporalTiler_BCTHW(logger=self.logger)
-        setattr(tiler, "_auto_memory_plan", getattr(self, "_auto_memory_plan", None))
-        setattr(tiler, "_get_gpu_memory_snapshot", self._get_gpu_memory_snapshot)
+        tiler = TemporalTiler_BCTHW(
+            logger=logger,
+            auto_memory_plan=auto_memory_plan,
+            gpu_memory_snapshot_fn=gpu_memory_snapshot_fn,
+        )
         return tiler.run(
             model_fn_wan_video,
             sliding_window_size,
