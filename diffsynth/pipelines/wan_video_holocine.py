@@ -403,6 +403,7 @@ class WanVideoHoloCinePipeline(BasePipeline):
             ", ".join(summary_parts),
         )
         self._log_gpu_memory_state("[BlockSwap] Post-configuration")
+        print(", ".join(summary_parts))
 
         return plan.config if plan.use_block_swap else None
 

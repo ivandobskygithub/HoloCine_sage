@@ -84,8 +84,8 @@ def run_inference(
     # --- Other Generation Parameters ---
     seed: int = 0,
     tiled: bool = True,
-    height: int = 480,
-    width: int = 832,
+    height: int = 240,
+    width: int = 416,
     num_inference_steps: int = 50,
     
     # --- Output Parameters ---
@@ -189,10 +189,26 @@ pipe = WanVideoHoloCinePipeline.from_pretrained(
     torch_dtype=torch.bfloat16,
     device=device,
     model_configs=[
-        ModelConfig(path="./checkpoints/Wan2.2-T2V-A14B//Wan2.2-T2V-A14B/models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
-        ModelConfig(path="./checkpoints/HoloCine_dit/sparse/sparse_high_noise.safetensors", offload_device="cpu"),
-        ModelConfig(path="./checkpoints/HoloCine_dit/sparse/sparse_low_noise.safetensors",  offload_device="cpu"),
-        ModelConfig(path="./checkpoints/Wan2.2-T2V-A14B/Wan2.2-T2V-A14B/Wan2.1_VAE.pth", offload_device="cpu"),
+        ModelConfig(
+            path="D:/development/HoloCine/checkpoints/Wan2.2-T2V-A14B/umt5-xxl-enc-bf16.safetensors",
+            offload_device="cpu",
+            offload_dtype=torch.bfloat16,
+        ),
+        ModelConfig(
+            path="D:/development/HoloCine/checkpoints/HoloCine_dit/sparse/Holocine_sparse_high_e4m3_fp8.safetensors",
+            offload_device="cpu",
+            offload_dtype=torch.float8_e4m3fn,
+        ),
+        ModelConfig(
+            path="D:/development/HoloCine/checkpoints/HoloCine_dit/sparse/Holocine_sparse_low_e4m3_fp8.safetensors",
+            offload_device="cpu",
+            offload_dtype=torch.float8_e4m3fn,
+        ),
+        ModelConfig(
+            path="D:/development/HoloCine/checkpoints/Wan2.2-T2V-A14B/wan_2.1_vae.safetensors",
+            offload_device="cpu",
+            offload_dtype=torch.float16,
+        ),
     ],
 )
 pipe.dit.use_sparse_self_attn=True
@@ -214,7 +230,7 @@ print("\n--- Running Example 1 (Structured Input) ---")
 run_inference(
     pipe=pipe,
     negative_prompt=scene_negative_prompt,
-    output_path="video1.mp4",
+    output_path="video2.mp4",
     
     # Choice 1 inputs
     global_caption="The scene is set in a lavish, 1920s Art Deco ballroom during a masquerade party. [character1] is a mysterious woman with a sleek bob, wearing a sequined silver dress and an ornate feather mask. [character2] is a dapper gentleman in a black tuxedo, his face half-hidden by a simple black domino mask. The environment is filled with champagne fountains, a live jazz band, and dancing couples in extravagant costumes. This scene contains 5 shots.",
@@ -226,61 +242,5 @@ run_inference(
         "A stylish medium two-shot of them standing together, the swirling party out of focus behind them, as they begin to converse."
 
     ],
-    num_frames=241
+    num_frames=141
 )
-
-
-# --- Example 2: Call using Raw String Input (Choice 2) ---
-# (Uses your original prompt format)
-print("\n--- Running Example 2 (Raw String Input) ---")
-
-run_inference(
-    pipe=pipe,
-    negative_prompt=scene_negative_prompt,
-    output_path="video2.mp4",
-    
-    # Choice 2 inputs
-    prompt="[global caption] The scene features a young painter, [character1], with paint-smudged cheeks and intense, focused eyes. Her hair is tied up messily. The setting is a bright, sun-drenched art studio with large windows, canvases, and the smell of oil paint. This scene contains 6 shots. [per shot caption] Medium shot of [character1] standing back from a large canvas, brush in hand, critically observing her work. [shot cut] Close-up of her hand holding the brush, dabbing it thoughtfully onto a palette of vibrant colors. [shot cut] Extreme close-up of her eyes, narrowed in concentration as she studies the canvas. [shot cut] Close-up on the canvas, showing a detailed, textured brushstroke being slowly applied. [shot cut] Medium close-up of [character1]'s face, a small, satisfied smile appears as she finds the right color. [shot cut] Over-the-shoulder shot showing her add a final, delicate highlight to the painting.",
-    num_frames=241,  
-    shot_cut_frames=[37, 73, 113, 169, 205]
-)
-
-
-
-# # we provide more samples for test, you can uncomment them and have a try.
-
-# run_inference(
-#     pipe=pipe,
-#     negative_prompt=scene_negative_prompt,
-#     output_path="video3.mp4",
-    
-#     # Choice 2 inputs
-#     prompt="[global caption] The scene is a magical encounter in a misty, ancient Celtic ruin at dawn. [character1] is a modern-day historian, a skeptical woman with practical hiking gear and a camera. [character2] is the spectral figure of an ancient Celtic queen, translucent and ethereal, with long, flowing red hair and a silver circlet. The environment is comprised of mossy standing stones and rolling green hills shrouded in morning mist. This scene contains 5 shots. [per shot caption] Medium shot of [character1] carefully touching a moss-covered standing stone, a look of academic interest on her face. [shot cut] Close-up of her face, her expression changing to one of utter shock as she sees something off-camera. [shot cut] A soft-focus shot of [character2] slowly materializing from the mist between two stones. [shot cut] Medium shot of [character1] stumbling backward, lowering her camera, her skepticism completely shattered. [shot cut] Close-up of [character2]'s spectral face, her expression sad and timeless as she looks at the historian.",
-#     num_frames=241,  
-#     shot_cut_frames=[49, 93, 137, 189]
-# )
-
-# run_inference(
-#     pipe=pipe,
-#     negative_prompt=scene_negative_prompt,
-#     output_path="video4.mp4",
-    
-#     # Choice 2 inputs
-#     prompt="[global caption] The scene is a magical encounter in a misty, ancient Celtic ruin at dawn. [character1] is a modern-day historian, a skeptical woman with practical hiking gear and a camera. [character2] is the spectral figure of an ancient Celtic queen, translucent and ethereal, with long, flowing red hair and a silver circlet. The environment is comprised of mossy standing stones and rolling green hills shrouded in morning mist. This scene contains 5 shots. [per shot caption] Medium shot of [character1] carefully touching a moss-covered standing stone, a look of academic interest on her face. [shot cut] Close-up of her face, her expression changing to one of utter shock as she sees something off-camera. [shot cut] A soft-focus shot of [character2] slowly materializing from the mist between two stones. [shot cut] Medium shot of [character1] stumbling backward, lowering her camera, her skepticism completely shattered. [shot cut] Close-up of [character2]'s spectral face, her expression sad and timeless as she looks at the historian.",
-#     num_frames=241,  
-#     shot_cut_frames=[49, 93, 137, 189],
-# )
-
-
-# run_inference(
-#     pipe=pipe,
-#     negative_prompt=scene_negative_prompt,
-#     output_path="video5.mp4",
-    
-#     # Choice 2 inputs
-#     prompt="[global caption] The scene is set in an enchanted, bioluminescent forest at twilight. [character1] is an ancient elf with long, silver hair braided with glowing flowers, wearing ethereal white robes. [character2] is a lost human child with short, messy brown hair and wide, fearful eyes, clutching a wooden toy. The environment is filled with giant, glowing mushrooms, sparkling flora, and shafts of moonlight breaking through a thick canopy. This scene contains 5 shots. [per shot caption] Medium shot of [character2] hiding behind a large, glowing mushroom, peering out nervously. [shot cut] Close-up of [character1]'s hand, fingers adorned with delicate rings, gently touching a luminous plant, causing it to glow brighter. [shot cut] Medium shot of [character1] turning their head, their pointed ears catching the faint sound of the child's whimper. [shot cut] Close-up of [character2]'s face, a tear rolling down their cheek, illuminated by the blue light of the forest. [shot cut] A soft-focus shot from the child's perspective, showing [character1] approaching slowly with a kind, reassuring smile, their form haloed by the forest's light.",
-#     num_frames=241,  
-#     shot_cut_frames=[49, 93, 137, 189],
-# )
-
-
