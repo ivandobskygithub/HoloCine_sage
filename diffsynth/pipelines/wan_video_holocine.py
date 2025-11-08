@@ -7,7 +7,7 @@ import types
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Iterable, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -212,6 +212,37 @@ class WanVideoHoloCinePipeline(BasePipeline):
         loader = GeneralLoRALoader(torch_dtype=target_dtype, device=self.device)
         lora = load_state_dict(path, torch_dtype=target_dtype, device=self.device)
         loader.load(module, lora, alpha=alpha)
+
+    def apply_lightning_lora(
+        self,
+        lora_paths,
+        *,
+        alpha: float = 1.0,
+        target_modules: Optional[tuple[str, ...]] = None,
+    ) -> None:
+        if isinstance(lora_paths, (str, Path)):
+            lora_paths = [str(lora_paths)]
+        elif isinstance(lora_paths, Iterable):
+            lora_paths = [str(path) for path in lora_paths]
+        else:
+            raise TypeError("lora_paths must be a path or an iterable of paths")
+
+        modules = []
+        module_names = target_modules or ("dit", "dit2")
+        for name in module_names:
+            module = getattr(self, name, None)
+            if module is not None:
+                modules.append(module)
+
+        if not modules:
+            raise ValueError(
+                "No modules available for Lightning LoRA application. "
+                "Ensure the pipeline is initialised before calling this method."
+            )
+
+        for module in modules:
+            for path in lora_paths:
+                self.load_lora(module, path, alpha=alpha)
 
 
     def _log_gpu_memory_state(self, context: str, level: int = logging.DEBUG) -> None:
