@@ -37,6 +37,100 @@ from .hunyuan_dit_text_encoder import HunyuanDiTCLIPTextEncoder, HunyuanDiTT5Tex
 from .hunyuan_dit import HunyuanDiT
 from .hunyuan_video_vae_decoder import HunyuanVideoVAEDecoder
 from .hunyuan_video_vae_encoder import HunyuanVideoVAEEncoder
+from .wan_video_dit import WanModel
+
+
+def _format_shape(tensor):
+    if tensor is None:
+        return "missing"
+    return "×".join(str(dim) for dim in tensor.shape)
+
+
+def _extract_wan_config_from_state_dict(state_dict):
+    config = {}
+    patch_weight = state_dict.get("patch_embedding.weight")
+    if patch_weight is not None:
+        config["dim"] = int(patch_weight.shape[0])
+        config["in_dim"] = int(patch_weight.shape[1])
+        config["patch_size"] = tuple(int(d) for d in patch_weight.shape[2:])
+    head_weight = state_dict.get("head.head.weight")
+    if head_weight is not None and "patch_size" in config:
+        patch_volume = 1
+        for dim in config["patch_size"]:
+            patch_volume *= dim
+        if patch_volume:
+            config["out_dim"] = int(head_weight.shape[0] // patch_volume)
+    ffn_weight = state_dict.get("blocks.0.ffn.0.weight")
+    if ffn_weight is not None:
+        config["ffn_dim"] = int(ffn_weight.shape[0])
+    time_weight = state_dict.get("time_embedding.0.weight")
+    if time_weight is not None:
+        config["freq_dim"] = int(time_weight.shape[1])
+    text_weight = state_dict.get("text_embedding.0.weight")
+    if text_weight is not None:
+        config["text_dim"] = int(text_weight.shape[1])
+    q_weight = state_dict.get("blocks.0.self_attn.q.weight")
+    k_weight = state_dict.get("blocks.0.self_attn.k.weight")
+    v_weight = state_dict.get("blocks.0.self_attn.v.weight")
+    o_weight = state_dict.get("blocks.0.self_attn.o.weight")
+    if q_weight is not None:
+        config["self_attn_q_shape"] = tuple(int(d) for d in q_weight.shape)
+    if k_weight is not None:
+        config["self_attn_k_shape"] = tuple(int(d) for d in k_weight.shape)
+    if v_weight is not None:
+        config["self_attn_v_shape"] = tuple(int(d) for d in v_weight.shape)
+    if o_weight is not None:
+        config["self_attn_o_shape"] = tuple(int(d) for d in o_weight.shape)
+    cross_q_weight = state_dict.get("blocks.0.cross_attn.q.weight")
+    cross_k_weight = state_dict.get("blocks.0.cross_attn.k.weight")
+    cross_v_weight = state_dict.get("blocks.0.cross_attn.v.weight")
+    if cross_q_weight is not None:
+        config["cross_attn_q_shape"] = tuple(int(d) for d in cross_q_weight.shape)
+    if cross_k_weight is not None:
+        config["cross_attn_k_shape"] = tuple(int(d) for d in cross_k_weight.shape)
+    if cross_v_weight is not None:
+        config["cross_attn_v_shape"] = tuple(int(d) for d in cross_v_weight.shape)
+    block_indices = {
+        int(name.split(".")[1])
+        for name in state_dict
+        if name.startswith("blocks.") and name.split(".")[1].isdigit()
+    }
+    if block_indices:
+        config["num_layers"] = len(block_indices)
+    return config
+
+
+def _raise_wan_shape_error(model, state_dict, exc):
+    first_block = model.blocks[0] if model.blocks else None
+    observed = {
+        "q": _format_shape(state_dict.get("blocks.0.self_attn.q.weight")),
+        "k": _format_shape(state_dict.get("blocks.0.self_attn.k.weight")),
+        "v": _format_shape(state_dict.get("blocks.0.self_attn.v.weight")),
+        "o": _format_shape(state_dict.get("blocks.0.self_attn.o.weight")),
+    }
+    expected = {}
+    if first_block is not None:
+        expected["q"] = _format_shape(first_block.self_attn.q.weight)
+        expected["k"] = _format_shape(first_block.self_attn.k.weight)
+        expected["v"] = _format_shape(first_block.self_attn.v.weight)
+        expected["o"] = _format_shape(first_block.self_attn.o.weight)
+    config_hint = _extract_wan_config_from_state_dict(state_dict)
+    shape_rows = []
+    for key in ("q", "k", "v", "o"):
+        shape_rows.append(f"    {key}: checkpoint={observed.get(key)} | model={expected.get(key)}")
+    config_lines = ["    " + name + "=" + str(value) for name, value in sorted(config_hint.items())]
+    message = [
+        "Failed to load WanModel weights from checkpoint due to incompatible attention shapes.",
+        "Observed projection shapes:",
+        *shape_rows,
+    ]
+    if config_lines:
+        message.append("Inferred checkpoint configuration (for reference):")
+        message.extend(config_lines)
+        message.append(
+            "If you are supplying manual model kwargs (e.g. WAN_GGUF_DIT_INIT), ensure they match the checkpoint's dimensions."
+        )
+    raise RuntimeError("\n".join(message)) from exc
 
 from .flux_dit import FluxDiT
 from .flux_text_encoder import FluxTextEncoder2
@@ -113,7 +207,12 @@ def load_model_from_single_file(
                     dtype=meta_param.dtype, 
                     device='cpu' 
                 )
-        model.load_state_dict(model_state_dict, assign=True,strict=False)
+        try:
+            model.load_state_dict(model_state_dict, assign=True,strict=False)
+        except RuntimeError as exc:
+            if isinstance(model, WanModel) and "size mismatch" in str(exc):
+                _raise_wan_shape_error(model, model_state_dict, exc)
+            raise
         model = model.to(dtype=torch_dtype, device=device)
         loaded_model_names.append(model_name)
         loaded_models.append(model)
