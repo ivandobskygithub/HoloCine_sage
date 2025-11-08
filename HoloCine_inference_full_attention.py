@@ -1,7 +1,10 @@
-import torch
 import math
+
+import torch
+
 from diffsynth import save_video
-from diffsynth.pipelines.wan_video_holocine import WanVideoHoloCinePipeline, ModelConfig
+from diffsynth.models.wan_video_dit import WanModel
+from diffsynth.pipelines.wan_video_holocine import ModelConfig, WanVideoHoloCinePipeline
 
 # ---------------------------------------------------
 #                Helper Functions
@@ -218,6 +221,14 @@ low_noise_checkpoint = (
 
 dit_offload_dtype = torch.float16 if USE_GGUF_MODELS else torch.float8_e4m3fn
 
+dit_override_kwargs = {}
+if USE_GGUF_MODELS:
+    dit_override_kwargs = {
+        "model_names": "wan_video_dit",
+        "model_classes": WanModel,
+        "model_resource": "civitai",
+    }
+
 pipe = WanVideoHoloCinePipeline.from_pretrained(
     torch_dtype=torch.bfloat16,
     latent_storage_dtype=torch.float8_e4m3fn,
@@ -234,11 +245,13 @@ pipe = WanVideoHoloCinePipeline.from_pretrained(
             offload_dtype=dit_offload_dtype,
             lora_paths=selected_lora_path,
             lora_alpha=LIGHTNING_LORA_ALPHA,
+            **dit_override_kwargs,
         ),
         ModelConfig(
             path=low_noise_checkpoint,
             offload_device="cpu",
             offload_dtype=dit_offload_dtype,
+            **dit_override_kwargs,
         ),
         ModelConfig(
             path="D:/development/HoloCine/checkpoints/Wan2.2-T2V-A14B/wan_2.1_vae.safetensors",

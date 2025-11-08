@@ -1,5 +1,7 @@
-import numpy as np
-import torch
+import pytest
+
+np = pytest.importorskip("numpy")
+torch = pytest.importorskip("torch")
 
 from diffsynth.models import utils as model_utils
 from diffsynth.pipelines import wan_video_holocine
@@ -50,6 +52,7 @@ def test_model_config_applies_lora(monkeypatch, tmp_path):
 
     class FakeModelManager:
         lora_calls = []
+        load_calls = []
 
         def __init__(self, torch_dtype=None, device=None):
             self.torch_dtype = torch_dtype
@@ -59,6 +62,7 @@ def test_model_config_applies_lora(monkeypatch, tmp_path):
             self.model_path = []
             self._loaded = {}
             self.lora_calls = []
+            self.__class__.load_calls = []
             self._name_sequence = [
                 "wan_video_text_encoder",
                 "wan_video_dit",
@@ -71,7 +75,23 @@ def test_model_config_applies_lora(monkeypatch, tmp_path):
                 return _DummyVAE()
             return torch.nn.Linear(1, 1)
 
-        def load_model(self, path, device=None, torch_dtype=None, model_names=None):
+        def load_model(
+            self,
+            path,
+            model_names=None,
+            model_classes=None,
+            model_resource=None,
+            device=None,
+            torch_dtype=None,
+        ):
+            self.__class__.load_calls.append(
+                {
+                    "path": path,
+                    "model_names": model_names,
+                    "model_classes": model_classes,
+                    "model_resource": model_resource,
+                }
+            )
             index = len(self.model)
             name = self._name_sequence[index] if index < len(self._name_sequence) else "wan_video_vace"
             module = self._create_module(name)
@@ -119,8 +139,20 @@ def test_model_config_applies_lora(monkeypatch, tmp_path):
         device="cpu",
         model_configs=[
             ModelConfig(path="/tmp/text_encoder.safetensors"),
-            ModelConfig(path="/tmp/high_noise.gguf", lora_paths=str(lora_path), lora_alpha=0.75),
-            ModelConfig(path="/tmp/low_noise.gguf"),
+            ModelConfig(
+                path="/tmp/high_noise.gguf",
+                lora_paths=str(lora_path),
+                lora_alpha=0.75,
+                model_names="wan_video_dit",
+                model_classes=torch.nn.Linear,
+                model_resource="civitai",
+            ),
+            ModelConfig(
+                path="/tmp/low_noise.gguf",
+                model_names="wan_video_dit",
+                model_classes=torch.nn.Linear,
+                model_resource="civitai",
+            ),
         ],
         tokenizer_config=ModelConfig(path=str(tokenizer_dir)),
         redirect_common_files=False,
@@ -136,3 +168,8 @@ def test_model_config_applies_lora(monkeypatch, tmp_path):
         else:
             flattened.append((paths, alpha))
     assert any(p == str(lora_path) and a == 0.75 for p, a in flattened)
+    assert any(
+        call["model_names"] == ["wan_video_dit"] and call["model_classes"] == [torch.nn.Linear]
+        for call in FakeModelManager.load_calls
+        if call["path"].endswith("high_noise.gguf") or call["path"].endswith("low_noise.gguf")
+    )
