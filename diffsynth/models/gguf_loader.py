@@ -36,6 +36,18 @@ class _TensorHandle:
     data: np.ndarray
 
 
+def _normalise_tensor_name(name) -> str:
+    """Convert tensor identifiers returned by GGUF readers to plain strings."""
+
+    if isinstance(name, bytes):
+        return name.decode("utf-8", errors="replace")
+    if isinstance(name, np.generic):
+        name = name.item()
+    if not isinstance(name, str):
+        name = str(name)
+    return name
+
+
 def _resolve_reader() -> type:
     """Return a ``GGUFReader`` implementation.
 
@@ -96,7 +108,10 @@ def _iter_reader_tensors(reader) -> Iterator[_TensorHandle]:
     tensors = getattr(reader, "tensors", None)
     if isinstance(tensors, dict):
         for name, tensor_obj in tensors.items():
-            yield _TensorHandle(name=name, data=_extract_numpy_array(tensor_obj))
+            yield _TensorHandle(
+                name=_normalise_tensor_name(name),
+                data=_extract_numpy_array(tensor_obj),
+            )
         return
     if isinstance(tensors, Iterable):
         for tensor_obj in tensors:
@@ -106,7 +121,10 @@ def _iter_reader_tensors(reader) -> Iterator[_TensorHandle]:
                 tensor_obj = tensor_obj[1]
             if name is None:
                 raise AttributeError("GGUF tensor is missing a name attribute.")
-            yield _TensorHandle(name=name, data=_extract_numpy_array(tensor_obj))
+            yield _TensorHandle(
+                name=_normalise_tensor_name(name),
+                data=_extract_numpy_array(tensor_obj),
+            )
         return
 
     tensor_infos = getattr(reader, "tensor_infos", None)
@@ -121,7 +139,10 @@ def _iter_reader_tensors(reader) -> Iterator[_TensorHandle]:
             name = getattr(info, "name", None) or getattr(tensor_obj, "name", None)
             if name is None:
                 raise AttributeError("Unable to determine tensor name from GGUF reader.")
-            yield _TensorHandle(name=name, data=_extract_numpy_array(tensor_obj))
+            yield _TensorHandle(
+                name=_normalise_tensor_name(name),
+                data=_extract_numpy_array(tensor_obj),
+            )
         return
 
     raise AttributeError("Unknown GGUF reader layout; no tensors available.")
