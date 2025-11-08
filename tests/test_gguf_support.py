@@ -11,6 +11,7 @@ np = pytest.importorskip("numpy")
 torch = pytest.importorskip("torch")
 
 from diffsynth.models import model_manager, utils as model_utils
+from diffsynth.models.wan_video_dit import WanModel
 from diffsynth.pipelines import wan_video_holocine
 from diffsynth.utils import ModelConfig
 
@@ -273,3 +274,37 @@ def test_manual_model_kwargs_enable_initialization():
     assert len(models) == 1
     assert isinstance(models[0], RequiresArgs)
     assert models[0].bias == pytest.approx(3.14)
+
+
+def test_wan_kwargs_inferred_from_state_dict():
+    template = WanModel(
+        dim=16,
+        in_dim=4,
+        ffn_dim=64,
+        out_dim=4,
+        text_dim=8,
+        freq_dim=4,
+        eps=1e-5,
+        patch_size=(1, 1, 1),
+        num_heads=4,
+        num_layers=2,
+        has_image_input=False,
+    )
+    state_dict = template.state_dict()
+
+    names, models = model_manager.load_model_from_single_file(
+        state_dict,
+        ["wan_video_dit"],
+        [WanModel],
+        "civitai",
+        torch.float32,
+        "cpu",
+    )
+
+    assert names == ["wan_video_dit"]
+    assert len(models) == 1
+    loaded = models[0]
+    assert isinstance(loaded, WanModel)
+    assert loaded.dim == 16
+    assert loaded.patch_size == (1, 1, 1)
+    assert len(loaded.blocks) == 2
