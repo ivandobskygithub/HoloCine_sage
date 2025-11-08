@@ -151,6 +151,15 @@ class ModelConfig:
     offload_dtype: Optional[torch.dtype] = None
     local_model_path: str = None
     skip_download: bool = False
+    lora_paths: Optional[Union[str, list[str]]] = None
+    lora_alpha: float = 1.0
+
+    def iter_lora_paths(self) -> list[str]:
+        if self.lora_paths is None:
+            return []
+        if isinstance(self.lora_paths, (list, tuple, set)):
+            return [str(path) for path in self.lora_paths if path]
+        return [str(self.lora_paths)] if self.lora_paths else []
 
     def download_if_necessary(self, use_usp=False):
         if self.path is None:
