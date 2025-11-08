@@ -185,7 +185,7 @@ def build_pipeline(
     latent_storage_dtype: Optional[torch.dtype] = None,
 ) -> WanVideoHoloCinePipeline:
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    if latent_storage_dtype is None and hasattr(torch, "float8_e4m3fn"):
+    if latent_storage_dtype is None and hasattr(torch, "float8_e4m3fn") and not use_quantized:
         latent_storage_dtype = getattr(torch, "float8_e4m3fn")
 
     configs = build_model_configs(
@@ -392,51 +392,78 @@ DEFAULT_NEGATIVE_PROMPT = (
 )
 
 
-def _print_configuration_summary(*, use_quantized: bool, lightning: Optional[str]) -> None:
-    print("\n--- HoloCine Full Attention Configuration ---")
-    print(f"Quantized GGUF: {'enabled' if use_quantized else 'disabled'}")
-    if lightning:
-        print(f"Lightning preset: {lightning}")
-    else:
-        print("Lightning preset: none")
-    print("--------------------------------------------\n")
+# ---------------------------------------------------
+#             Default Configuration Values
+# ---------------------------------------------------
+
+CHECKPOINT_ROOT = os.getenv("HOLOCINE_CHECKPOINT_ROOT", "/path/to/checkpoints")
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+USE_QUANTIZED = False  # Switch to True to enable QuantStack GGUF checkpoints
+QUANT_SUFFIX = "Q4_K_M"
+MODEL_OVERRIDES: dict[str, str] = {}
+
+LIGHTNING_PRESET: Optional[str] = None  # choose "wan1.1" or "wan2.2" to enable Lightning
+LIGHTNING_ALPHA: float = 1.0
+LIGHTNING_PATHS: Sequence[str] = ()
+
+NUM_INFERENCE_STEPS: Optional[int] = None
+HEIGHT = 480
+WIDTH = 832
+TILED = True
+SEED = 0
+FPS = 15
+QUALITY = 5
 
 
-if __name__ == "__main__":
-    CHECKPOINT_ROOT = os.getenv("HOLOCINE_CHECKPOINT_ROOT", "/path/to/checkpoints")
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    USE_QUANTIZED = False
-    QUANT_SUFFIX = "Q4_K_M"
-    MODEL_OVERRIDES: dict[str, str] = {}
-
-    LIGHTNING_PRESET = None  # choose "wan1.1" or "wan2.2" when available
-    LIGHTNING_ALPHA = 1.0
-    LIGHTNING_PATHS: Sequence[str] = ()
-
-    NUM_INFERENCE_STEPS: Optional[int] = None
-    NEGATIVE_PROMPT = DEFAULT_NEGATIVE_PROMPT
-
-    HEIGHT = 480
-    WIDTH = 832
-    TILED = True
-    SEED = 0
-    FPS = 15
-    QUALITY = 5
-
-    RUN_STRUCTURED_SCENARIO = True
-    STRUCTURED_OUTPUT_PATH = "video1.mp4"
-
-    RUN_COMBINED_SCENARIO = False
-    COMBINED_OUTPUT_PATH = "video2.mp4"
+def load_full_attention_pipeline() -> WanVideoHoloCinePipeline:
+    """Load the preconfigured full-attention pipeline."""
 
     print("Loading HoloCine pipeline...")
-    pipeline = build_pipeline(
+    pipe = build_pipeline(
         checkpoint_root=CHECKPOINT_ROOT,
         device=DEVICE,
         use_quantized=USE_QUANTIZED,
         quant_suffix=QUANT_SUFFIX,
         model_overrides=MODEL_OVERRIDES or None,
     )
+    return pipe
+
+
+def _describe_configuration(*, steps: int) -> None:
+    print("\n--- HoloCine Full Attention Configuration ---")
+    print(f"Device: {DEVICE}")
+    print(f"Quantized GGUF: {'enabled' if USE_QUANTIZED else 'disabled'}")
+    if USE_QUANTIZED:
+        print(f"  Quant suffix: {QUANT_SUFFIX}")
+    if LIGHTNING_PRESET or LIGHTNING_PATHS:
+        print(f"Lightning preset: {LIGHTNING_PRESET or 'custom paths'} (alpha={LIGHTNING_ALPHA})")
+    else:
+        print("Lightning preset: none")
+    print(f"Inference steps: {steps}")
+    print("--------------------------------------------\n")
+
+
+def _run_structured_demo(pipe: WanVideoHoloCinePipeline, *, steps: int) -> None:
+    print("\n--- Running Example 1 (Structured Input) ---")
+    run_inference(
+        pipe=pipe,
+        negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+        output_path="video1.mp4",
+        global_caption=STRUCTURED_DEMO_GLOBAL_CAPTION,
+        shot_captions=list(STRUCTURED_DEMO_SHOT_CAPTIONS),
+        num_frames=STRUCTURED_DEMO_NUM_FRAMES,
+        num_inference_steps=steps,
+        seed=SEED,
+        tiled=TILED,
+        height=HEIGHT,
+        width=WIDTH,
+        fps=FPS,
+        quality=QUALITY,
+    )
+
+
+if __name__ == "__main__":
+    pipeline = load_full_attention_pipeline()
 
     recommended_steps: Optional[int] = None
     if LIGHTNING_PRESET or LIGHTNING_PATHS:
@@ -448,45 +475,26 @@ if __name__ == "__main__":
             alpha=LIGHTNING_ALPHA,
         )
 
-    _print_configuration_summary(
-        use_quantized=USE_QUANTIZED,
-        lightning=LIGHTNING_PRESET,
-    )
-
     active_steps = NUM_INFERENCE_STEPS or recommended_steps or 50
+    _describe_configuration(steps=active_steps)
 
-    if RUN_STRUCTURED_SCENARIO:
-        print("--- Running structured multi-shot scenario ---")
-        run_inference(
-            pipe=pipeline,
-            output_path=STRUCTURED_OUTPUT_PATH,
-            global_caption=STRUCTURED_DEMO_GLOBAL_CAPTION,
-            shot_captions=list(STRUCTURED_DEMO_SHOT_CAPTIONS),
-            num_frames=STRUCTURED_DEMO_NUM_FRAMES,
-            negative_prompt=NEGATIVE_PROMPT,
-            num_inference_steps=active_steps,
-            seed=SEED,
-            tiled=TILED,
-            height=HEIGHT,
-            width=WIDTH,
-            fps=FPS,
-            quality=QUALITY,
-        )
+    _run_structured_demo(pipeline, steps=active_steps)
 
-    if RUN_COMBINED_SCENARIO:
-        print("--- Running combined prompt scenario ---")
-        run_inference(
-            pipe=pipeline,
-            output_path=COMBINED_OUTPUT_PATH,
-            prompt=COMBINED_DEMO_PROMPT,
-            num_frames=COMBINED_DEMO_NUM_FRAMES,
-            shot_cut_frames=list(COMBINED_DEMO_SHOT_CUT_FRAMES),
-            negative_prompt=NEGATIVE_PROMPT,
-            num_inference_steps=active_steps,
-            seed=SEED,
-            tiled=TILED,
-            height=HEIGHT,
-            width=WIDTH,
-            fps=FPS,
-            quality=QUALITY,
-        )
+    # --- Example 2: Call using Raw String Input (Choice 2) ---
+    # Uncomment to try the combined caption format with manual cuts.
+    # print("\n--- Running Example 2 (Raw String Input) ---")
+    # run_inference(
+    #     pipe=pipeline,
+    #     negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+    #     output_path="video2.mp4",
+    #     prompt=COMBINED_DEMO_PROMPT,
+    #     num_frames=COMBINED_DEMO_NUM_FRAMES,
+    #     shot_cut_frames=list(COMBINED_DEMO_SHOT_CUT_FRAMES),
+    #     num_inference_steps=active_steps,
+    #     seed=SEED,
+    #     tiled=TILED,
+    #     height=HEIGHT,
+    #     width=WIDTH,
+    #     fps=FPS,
+    #     quality=QUALITY,
+    # )
