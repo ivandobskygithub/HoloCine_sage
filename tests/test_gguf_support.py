@@ -308,3 +308,49 @@ def test_wan_kwargs_inferred_from_state_dict():
     assert loaded.dim == 16
     assert loaded.patch_size == (1, 1, 1)
     assert len(loaded.blocks) == 2
+
+
+def test_pipeline_raises_when_dit_missing(monkeypatch, tmp_path):
+    class EmptyModelManager:
+        def __init__(self, torch_dtype=None, device=None):
+            self.torch_dtype = torch_dtype
+            self.device = device
+
+        def load_model(
+            self,
+            path,
+            model_names=None,
+            model_classes=None,
+            model_resource=None,
+            device=None,
+            torch_dtype=None,
+            model_kwargs=None,
+        ):
+            return None
+
+        def load_lora(self, file_path="", state_dict=None, lora_alpha=1.0):
+            return None
+
+        def fetch_model(self, model_name, index=None, require_model_path=False, file_path=None):
+            if model_name == "wan_video_dit":
+                return None
+            return torch.nn.Linear(1, 1)
+
+    monkeypatch.setattr(wan_video_holocine, "ModelManager", EmptyModelManager)
+    monkeypatch.setattr(wan_video_holocine.WanPrompter, "fetch_models", lambda self, text_encoder: None)
+    monkeypatch.setattr(wan_video_holocine.WanPrompter, "fetch_tokenizer", lambda self, path: None)
+
+    tokenizer_dir = tmp_path / "tokenizer"
+    tokenizer_dir.mkdir()
+
+    text_encoder_path = tmp_path / "text_encoder.safetensors"
+    text_encoder_path.write_text("stub")
+
+    with pytest.raises(RuntimeError, match="wan_video_dit"):
+        wan_video_holocine.WanVideoHoloCinePipeline.from_pretrained(
+            torch_dtype=torch.float16,
+            device="cpu",
+            model_configs=[ModelConfig(path=str(text_encoder_path))],
+            tokenizer_config=ModelConfig(path=str(tokenizer_dir)),
+            redirect_common_files=False,
+        )
