@@ -25,6 +25,17 @@ class _DummyTensor:
         return self._array
 
 
+class _DummyTorchTensor:
+    def __init__(self, name: str, tensor: torch.Tensor):
+        self.name = name
+        self._tensor = tensor
+        self.calls = 0
+
+    def to_torch(self):
+        self.calls += 1
+        return self._tensor
+
+
 class _DummyReader:
     def __init__(self, path: str):
         self.path = path
@@ -49,6 +60,38 @@ def test_load_state_dict_from_gguf(monkeypatch, tmp_path):
     assert set(state_dict.keys()) == {"dummy.weight", "dummy.bias"}
     assert all(tensor.device.type == "cpu" for tensor in state_dict.values())
     assert all(tensor.dtype == torch.float32 for tensor in state_dict.values())
+
+
+def test_load_state_dict_from_gguf_prefers_to_torch(monkeypatch, tmp_path):
+    checkpoint_path = tmp_path / "mock.gguf"
+    checkpoint_path.write_bytes(b"GGUF")
+
+    quant_tensor = _DummyTorchTensor("quant.weight", torch.ones((2, 2), dtype=torch.float32))
+
+    class _Reader:
+        def __init__(self, path: str):
+            self.path = path
+            self.tensors = [
+                quant_tensor,
+                _DummyTensor("quant.bias", np.array([0.0], dtype=np.float32)),
+            ]
+
+    class _Module:
+        GGUFReader = _Reader
+
+    monkeypatch.setattr(model_utils, "gguf", _Module)
+
+    target_device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    state_dict = model_utils.load_state_dict(
+        str(checkpoint_path), torch_dtype=torch.float16, device=target_device
+    )
+
+    assert quant_tensor.calls == 1
+    weight = state_dict["quant.weight"]
+    assert weight.dtype == torch.float16
+    assert weight.device.type == target_device
+    assert weight.data_ptr() != quant_tensor._tensor.data_ptr()
 
 
 def test_model_config_applies_lora(monkeypatch, tmp_path):

@@ -71,8 +71,7 @@ def _load_tensor_from_numpy(array, torch_dtype=None, device="cpu"):
     if array is None:
         raise ValueError("Received None array when converting GGUF tensor")
 
-    if not isinstance(array, np.ndarray):
-        array = np.array(array)
+    array = np.array(array, copy=True)
 
     try:
         tensor = torch.from_numpy(array)
@@ -124,6 +123,46 @@ def load_state_dict_from_bin(file_path, torch_dtype=None, device="cpu"):
     return state_dict
 
 
+def _tensor_from_gguf(tensor, torch_dtype=None, device="cpu"):
+    torch_tensor = None
+
+    if hasattr(tensor, "to_torch"):
+        candidate = tensor.to_torch()
+        if isinstance(candidate, torch.Tensor):
+            torch_tensor = candidate.detach().clone().to(device="cpu")
+        elif hasattr(candidate, "to_numpy"):
+            array = candidate.to_numpy()
+            torch_tensor = _load_tensor_from_numpy(array, torch_dtype=None, device="cpu")
+        elif hasattr(candidate, "numpy"):
+            array = candidate.numpy()
+            torch_tensor = _load_tensor_from_numpy(array, torch_dtype=None, device="cpu")
+
+    if torch_tensor is None and hasattr(tensor, "to_numpy"):
+        array = tensor.to_numpy()
+        torch_tensor = _load_tensor_from_numpy(array, torch_dtype=None, device="cpu")
+
+    if torch_tensor is None:
+        data = getattr(tensor, "data", None)
+        if callable(data):
+            data = data()
+
+        if hasattr(data, "to_numpy"):
+            array = data.to_numpy()
+        elif hasattr(data, "numpy"):
+            array = data.numpy()
+        else:
+            array = data
+
+        torch_tensor = _load_tensor_from_numpy(array, torch_dtype=None, device="cpu")
+
+    if torch_dtype is not None:
+        torch_tensor = torch_tensor.to(torch_dtype)
+    if device is not None:
+        torch_tensor = torch_tensor.to(device)
+
+    return torch_tensor
+
+
 def load_state_dict_from_gguf(file_path, torch_dtype=None, device="cpu"):
     if gguf is None:
         raise ImportError(
@@ -138,19 +177,7 @@ def load_state_dict_from_gguf(file_path, torch_dtype=None, device="cpu"):
 
     for tensor in reader.tensors:
         tensor_name = _normalize_tensor_name(tensor)
-        data = getattr(tensor, "data", None)
-
-        if callable(data):
-            data = data()
-
-        if hasattr(data, "to_numpy"):
-            array = data.to_numpy()
-        elif hasattr(data, "numpy"):
-            array = data.numpy()
-        else:
-            array = data
-
-        torch_tensor = _load_tensor_from_numpy(array, torch_dtype=torch_dtype, device=device)
+        torch_tensor = _tensor_from_gguf(tensor, torch_dtype=torch_dtype, device=device)
         state_dict[tensor_name] = torch_tensor
         tensor_count += 1
 
