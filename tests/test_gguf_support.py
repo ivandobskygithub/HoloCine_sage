@@ -1,9 +1,16 @@
+import pathlib
+import sys
+
 import pytest
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 np = pytest.importorskip("numpy")
 torch = pytest.importorskip("torch")
 
-from diffsynth.models import utils as model_utils
+from diffsynth.models import model_manager, utils as model_utils
 from diffsynth.pipelines import wan_video_holocine
 from diffsynth.utils import ModelConfig
 
@@ -83,6 +90,7 @@ def test_model_config_applies_lora(monkeypatch, tmp_path):
             model_resource=None,
             device=None,
             torch_dtype=None,
+            model_kwargs=None,
         ):
             self.__class__.load_calls.append(
                 {
@@ -90,6 +98,7 @@ def test_model_config_applies_lora(monkeypatch, tmp_path):
                     "model_names": model_names,
                     "model_classes": model_classes,
                     "model_resource": model_resource,
+                    "model_kwargs": model_kwargs,
                 }
             )
             index = len(self.model)
@@ -146,12 +155,14 @@ def test_model_config_applies_lora(monkeypatch, tmp_path):
                 model_names="wan_video_dit",
                 model_classes=torch.nn.Linear,
                 model_resource="civitai",
+                model_kwargs={"wan_video_dit": {"bias": 1.0}},
             ),
             ModelConfig(
                 path="/tmp/low_noise.gguf",
                 model_names="wan_video_dit",
                 model_classes=torch.nn.Linear,
                 model_resource="civitai",
+                model_kwargs={"wan_video_dit": {"bias": 2.0}},
             ),
         ],
         tokenizer_config=ModelConfig(path=str(tokenizer_dir)),
@@ -173,3 +184,49 @@ def test_model_config_applies_lora(monkeypatch, tmp_path):
         for call in FakeModelManager.load_calls
         if call["path"].endswith("high_noise.gguf") or call["path"].endswith("low_noise.gguf")
     )
+    assert any(
+        call["model_kwargs"] and call["model_kwargs"][0]["bias"] == 1.0
+        for call in FakeModelManager.load_calls
+        if call["path"].endswith("high_noise.gguf")
+    )
+    assert any(
+        call["model_kwargs"] and call["model_kwargs"][0]["bias"] == 2.0
+        for call in FakeModelManager.load_calls
+        if call["path"].endswith("low_noise.gguf")
+    )
+
+
+def test_manual_model_kwargs_enable_initialization():
+    state_dict = {"weight": torch.zeros(1)}
+
+    class DummyConverter:
+        def from_civitai(self, incoming_state_dict):
+            return incoming_state_dict, {}
+
+        def from_diffusers(self, incoming_state_dict):
+            return incoming_state_dict, {}
+
+    class RequiresArgs(torch.nn.Module):
+        def __init__(self, *, bias):
+            super().__init__()
+            self.bias = bias
+            self.register_parameter("weight", torch.nn.Parameter(torch.zeros(1)))
+
+        @staticmethod
+        def state_dict_converter():
+            return DummyConverter()
+
+    names, models = model_manager.load_model_from_single_file(
+        state_dict,
+        ["wan_video_dit"],
+        [RequiresArgs],
+        "civitai",
+        torch.float32,
+        "cpu",
+        manual_extra_kwargs=[{"bias": 3.14}],
+    )
+
+    assert names == ["wan_video_dit"]
+    assert len(models) == 1
+    assert isinstance(models[0], RequiresArgs)
+    assert models[0].bias == pytest.approx(3.14)

@@ -3,10 +3,11 @@ import importlib
 import os
 import warnings
 from dataclasses import dataclass
-from typing import Optional, Sequence, Type, Union
+from typing import Any, Mapping, Optional, Sequence, Type, Union
 
 import numpy as np
 import torch
+
 from PIL import Image
 from einops import reduce, repeat
 from modelscope import snapshot_download
@@ -158,6 +159,7 @@ class ModelConfig:
     model_names: Optional[Union[str, Sequence[str]]] = None
     model_classes: Optional[Union[Type[torch.nn.Module], Sequence[Type[torch.nn.Module]], str, Sequence[str]]] = None
     model_resource: Optional[str] = None
+    model_kwargs: Optional[Union[Mapping[str, Any], Sequence[Mapping[str, Any]]]] = None
 
     def _as_list(self, value):
         if value is None:
@@ -171,6 +173,28 @@ class ModelConfig:
 
     def iter_model_names(self) -> list[str]:
         return [str(name) for name in self._as_list(self.model_names)]
+
+    def iter_model_kwargs(self) -> list[dict[str, Any]]:
+        if self.model_kwargs is None:
+            return []
+
+        if isinstance(self.model_kwargs, Mapping):
+            names = self.iter_model_names()
+            if names and all(name in self.model_kwargs for name in names):
+                return [dict(self.model_kwargs[name]) for name in names]
+            return [dict(self.model_kwargs)]
+
+        kwargs_list: list[dict[str, Any]] = []
+        for item in self._as_list(self.model_kwargs):
+            if item is None:
+                kwargs_list.append({})
+            elif isinstance(item, Mapping):
+                kwargs_list.append(dict(item))
+            else:
+                raise TypeError(
+                    "ModelConfig.model_kwargs entries must be mapping objects."
+                )
+        return kwargs_list
 
     def _resolve_model_class(self, target) -> Type[torch.nn.Module]:
         if isinstance(target, str):

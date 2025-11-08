@@ -198,6 +198,30 @@ WAN_LIGHTNING_LORA_OPTIONS = {
 selected_lora_path = WAN_LIGHTNING_LORA_OPTIONS.get(LIGHTNING_LORA_SELECTION)
 if selected_lora_path:
     print(f"Using Lightning LoRA preset '{LIGHTNING_LORA_SELECTION}': {selected_lora_path}")
+
+WAN_GGUF_DIT_INIT = {
+    "wan_video_dit": {
+        "dim": 5120,
+        "in_dim": 16,
+        "ffn_dim": 13824,
+        "out_dim": 16,
+        "text_dim": 4096,
+        "freq_dim": 256,
+        "eps": 1e-6,
+        "patch_size": (1, 2, 2),
+        "num_heads": 40,
+        "num_layers": 40,
+        "has_image_input": False,
+        "has_image_pos_emb": False,
+        "has_ref_conv": False,
+        "add_control_adapter": False,
+        "in_dim_control_adapter": 24,
+        "seperated_timestep": False,
+        "require_vae_embedding": True,
+        "require_clip_embedding": True,
+        "fuse_vae_embedding_in_latents": False,
+    }
+}
 else:
     if LIGHTNING_LORA_SELECTION:
         print(f"Lightning LoRA preset '{LIGHTNING_LORA_SELECTION}' not found or disabled. Proceeding without LoRA.")
@@ -227,6 +251,7 @@ if USE_GGUF_MODELS:
         "model_names": "wan_video_dit",
         "model_classes": WanModel,
         "model_resource": "civitai",
+        "model_kwargs": WAN_GGUF_DIT_INIT,
     }
 
 pipe = WanVideoHoloCinePipeline.from_pretrained(

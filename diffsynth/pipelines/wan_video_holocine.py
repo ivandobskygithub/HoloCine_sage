@@ -1025,13 +1025,15 @@ class WanVideoHoloCinePipeline(BasePipeline):
             model_config.download_if_necessary(use_usp=use_usp)
             override_model_names = model_config.iter_model_names()
             override_model_classes = model_config.iter_model_classes()
+            override_model_kwargs = model_config.iter_model_kwargs()
             model_manager.load_model(
                 model_config.path,
                 model_names=override_model_names if override_model_names else None,
                 model_classes=override_model_classes if override_model_classes else None,
                 model_resource=model_config.model_resource,
                 device=model_config.offload_device or device,
-                torch_dtype=model_config.offload_dtype or torch_dtype
+                torch_dtype=model_config.offload_dtype or torch_dtype,
+                model_kwargs=override_model_kwargs if override_model_kwargs else None,
             )
             lora_paths = model_config.iter_lora_paths()
             if lora_paths:

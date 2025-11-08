@@ -53,9 +53,25 @@ from ..configs.model_config import model_loader_configs, huggingface_model_loade
 from .utils import load_state_dict, init_weights_on_device, hash_state_dict_keys, split_state_dict_with_prefix
 
 
-def load_model_from_single_file(state_dict, model_names, model_classes, model_resource, torch_dtype, device):
+def load_model_from_single_file(
+    state_dict,
+    model_names,
+    model_classes,
+    model_resource,
+    torch_dtype,
+    device,
+    manual_extra_kwargs=None,
+):
+    manual_extra_kwargs = manual_extra_kwargs or []
     loaded_model_names, loaded_models = [], []
-    for model_name, model_class in zip(model_names, model_classes):
+    expanded_manual_kwargs = list(manual_extra_kwargs)
+    if expanded_manual_kwargs and len(expanded_manual_kwargs) < len(model_names):
+        last_kwargs = expanded_manual_kwargs[-1]
+        expanded_manual_kwargs.extend([last_kwargs] * (len(model_names) - len(expanded_manual_kwargs)))
+    elif not expanded_manual_kwargs:
+        expanded_manual_kwargs = [{} for _ in model_names]
+
+    for idx, (model_name, model_class) in enumerate(zip(model_names, model_classes)):
         print(f"    model_name: {model_name} model_class: {model_class.__name__}")
         state_dict_converter = model_class.state_dict_converter()
         if model_resource == "civitai":
@@ -67,9 +83,11 @@ def load_model_from_single_file(state_dict, model_names, model_classes, model_re
             print(f"        This model is initialized with extra kwargs: {extra_kwargs}")
         else:
             model_state_dict, extra_kwargs = state_dict_results, {}
+        manual_kwargs = expanded_manual_kwargs[idx] if idx < len(expanded_manual_kwargs) else {}
+        combined_kwargs = {**extra_kwargs, **manual_kwargs}
         torch_dtype = torch.float32 if extra_kwargs.get("upcast_to_float32", False) else torch_dtype
         with init_weights_on_device():
-            model = model_class(**extra_kwargs)
+            model = model_class(**combined_kwargs)
         if hasattr(model, "eval"):
             model = model.eval()
 
@@ -423,6 +441,7 @@ class ModelManager:
         model_resource=None,
         device=None,
         torch_dtype=None,
+        model_kwargs=None,
     ):
         print(f"Loading models from: {file_path}")
         if device is None:
@@ -432,6 +451,7 @@ class ModelManager:
         manual_model_names = model_names or []
         manual_model_classes = model_classes or []
         manual_resource = model_resource
+        manual_model_kwargs = model_kwargs or []
         if isinstance(file_path, list):
             state_dict = {}
             for path in file_path:
@@ -457,6 +477,9 @@ class ModelManager:
             if manual_model_names and manual_model_classes and state_dict is not None:
                 if manual_resource is None:
                     manual_resource = "civitai"
+                manual_kwargs = None
+                if manual_model_kwargs:
+                    manual_kwargs = [dict(kwargs) for kwargs in manual_model_kwargs]
                 loaded_names, loaded_models = load_model_from_single_file(
                     state_dict,
                     manual_model_names,
@@ -464,6 +487,7 @@ class ModelManager:
                     manual_resource,
                     torch_dtype,
                     device,
+                    manual_extra_kwargs=manual_kwargs,
                 )
                 for model_name, model in zip(loaded_names, loaded_models):
                     self.model.append(model)
