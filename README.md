@@ -150,6 +150,25 @@ To use the full attention version.
 python HoloCine_inference_full_attention.py
 ```
 
+To launch the quantised GGUF checkpoints with an 8-step Lightning LoRA, pass the
+corresponding arguments on the command line. Replace the placeholder paths with
+the locations of your checkpoints if you do not rely on `HOLOCINE_CHECKPOINT_ROOT`.
+
+```shell
+python HoloCine_inference_full_attention.py \
+  --checkpoint-root /path/to/checkpoints \
+  --use-quantized \
+  --quant-suffix Q4_K_M \
+  --lightning wan2.2 \
+  --output holocine_quantized_lightning.mp4 \
+  --prompt "A sweeping drone shot over a futuristic coastal city at golden hour, neon billboards glinting as air taxis weave between slender skyscrapers." \
+  --num-inference-steps 8
+```
+
+If you prefer not to pass arguments at the command line, edit and execute
+`examples/run_full_attention_quantized.py` instead. The helper script mirrors the
+CLI options and allows you to set all parameters in a single configuration block.
+
 To use the sparse inter-shot attention version.
 
 ```shell
