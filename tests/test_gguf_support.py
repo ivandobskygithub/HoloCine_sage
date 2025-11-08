@@ -20,7 +20,7 @@ def test_load_state_dict_from_gguf(monkeypatch, tmp_path):
 
     class FakeGGUFReader:
         def __init__(self, path):
-            self.tensors = [FakeTensor("model.weight")]
+            self.tensors = [FakeTensor(b"model.weight")]
 
     monkeypatch.setitem(sys.modules, "gguf", type("M", (), {"GGUFReader": FakeGGUFReader}))
 
@@ -29,6 +29,8 @@ def test_load_state_dict_from_gguf(monkeypatch, tmp_path):
 
     state_dict = load_state_dict(str(file_path))
     assert "model.weight" in state_dict
+    (key,) = state_dict.keys()
+    assert isinstance(key, str)
     tensor = state_dict["model.weight"]
     assert isinstance(tensor, torch.Tensor)
     assert tensor.dtype in {torch.float32, torch.float16, torch.bfloat16}

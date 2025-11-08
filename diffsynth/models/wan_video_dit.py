@@ -745,6 +745,8 @@ class WanModelStateDictConverter:
             "proj_out.weight": "head.head.weight",
         }
         state_dict_ = {}
+        passthrough_keys = []
+        ignored_keys = []
         for name, param in state_dict.items():
             if name in rename_dict:
                 state_dict_[rename_dict[name]] = param
@@ -754,6 +756,11 @@ class WanModelStateDictConverter:
                     name_ = rename_dict[name_]
                     name_ = ".".join(name_.split(".")[:1] + [name.split(".")[1]] + name_.split(".")[2:])
                     state_dict_[name_] = param
+                elif self._is_native_parameter_key(name):
+                    state_dict_[name] = param
+                    passthrough_keys.append(name)
+                else:
+                    ignored_keys.append(name)
         if hash_state_dict_keys(state_dict) == "cb104773c6c2cb6df4f9529ad5c60d0b":
             config = {
                 "model_type": "t2v",
@@ -778,6 +785,15 @@ class WanModelStateDictConverter:
     
     def from_civitai(self, state_dict):
         state_dict = {name: param for name, param in state_dict.items() if not name.startswith("vace")}
+        converted_state_dict = {}
+        passthrough_keys = []
+        ignored_keys = []
+        for name, param in state_dict.items():
+            if self._is_native_parameter_key(name):
+                converted_state_dict[name] = param
+                passthrough_keys.append(name)
+            else:
+                ignored_keys.append(name)
         if hash_state_dict_keys(state_dict) == "9269f8db9040a9d860eaca435be61814":
             config = {
                 "has_image_input": False,

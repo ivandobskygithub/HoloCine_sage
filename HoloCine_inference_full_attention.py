@@ -21,10 +21,10 @@ class LightningPreset:
 DEFAULT_CHECKPOINT_LAYOUT = {
     "text_encoder": "Wan2.2-T2V-A14B/umt5-xxl-enc-bf16.safetensors",
     "vae": "Wan2.2-T2V-A14B/wan_2.1_vae.safetensors",
-    "dit_high_fp8": "HoloCine_dit/full/Holocine_full_high_e4m3_fp8.safetensors",
-    "dit_low_fp8": "HoloCine_dit/full/Holocine_full_low_e4m3_fp8.safetensors",
-    "dit_high_quant": "HoloCine_dit/quantized/HoloCine-Full-HighNoise-{suffix}.gguf",
-    "dit_low_quant": "HoloCine_dit/quantized/HoloCine-Full-LowNoise-{suffix}.gguf",
+    "dit_high_fp8": "full/Holocine_full_high_e4m3_fp8.safetensors",
+    "dit_low_fp8": "full/Holocine_full_low_e4m3_fp8.safetensors",
+    "dit_high_quant": "quantized/HoloCine-Full-HighNoise-{suffix}.gguf",
+    "dit_low_quant": "quantized/HoloCine-Full-LowNoise-{suffix}.gguf",
 }
 
 
@@ -396,9 +396,9 @@ DEFAULT_NEGATIVE_PROMPT = (
 #             Default Configuration Values
 # ---------------------------------------------------
 
-CHECKPOINT_ROOT = os.getenv("HOLOCINE_CHECKPOINT_ROOT", "/path/to/checkpoints")
+CHECKPOINT_ROOT = os.getenv("HOLOCINE_CHECKPOINT_ROOT", "D:/development/HoloCine_sage/models/")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-USE_QUANTIZED = False  # Switch to True to enable QuantStack GGUF checkpoints
+USE_QUANTIZED = True  # Switch to True to enable QuantStack GGUF checkpoints
 QUANT_SUFFIX = "Q4_K_M"
 MODEL_OVERRIDES: dict[str, str] = {}
 

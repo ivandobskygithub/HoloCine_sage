@@ -2233,7 +2233,9 @@ def model_fn_wan_video(
 
 
     # Timestep
-    if dit.seperated_timestep and fuse_vae_embedding_in_latents:
+    seperated_timestep = getattr(dit, "seperated_timestep", False)
+
+    if seperated_timestep and fuse_vae_embedding_in_latents:
         timestep = torch.concat([
             torch.zeros((1, latents.shape[3] * latents.shape[4] // 4), dtype=latents.dtype, device=latents.device),
             torch.ones((latents.shape[2] - 1, latents.shape[3] * latents.shape[4] // 4), dtype=latents.dtype, device=latents.device) * timestep
