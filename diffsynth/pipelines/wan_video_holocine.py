@@ -2133,6 +2133,15 @@ def model_fn_wan_video(
     ] = None,
     **kwargs,
 ):
+    if dit is None:
+        raise ValueError(
+            "DiT model is not loaded. Ensure the pipeline has loaded a Wan video DiT checkpoint before running inference."
+        )
+
+    dit_impl = getattr(dit, "module", None)
+    if isinstance(dit_impl, WanModel):
+        dit = dit_impl
+
     if sliding_window_size is not None and sliding_window_stride is not None:
         model_kwargs = dict(
             dit=dit,
@@ -2219,7 +2228,9 @@ def model_fn_wan_video(
 
 
     # Timestep
-    if dit.seperated_timestep and fuse_vae_embedding_in_latents:
+    seperated_timestep = getattr(dit, "seperated_timestep", False)
+
+    if seperated_timestep and fuse_vae_embedding_in_latents:
         timestep = torch.concat([
             torch.zeros((1, latents.shape[3] * latents.shape[4] // 4), dtype=latents.dtype, device=latents.device),
             torch.ones((latents.shape[2] - 1, latents.shape[3] * latents.shape[4] // 4), dtype=latents.dtype, device=latents.device) * timestep
