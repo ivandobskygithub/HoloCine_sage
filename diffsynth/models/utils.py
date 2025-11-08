@@ -3,6 +3,11 @@ from safetensors import safe_open
 from contextlib import contextmanager
 import hashlib
 
+try:  # pragma: no cover - optional dependency resolved at runtime
+    import gguf  # type: ignore
+except ImportError:  # pragma: no cover - tested via monkeypatch
+    gguf = None
+
 @contextmanager
 def init_weights_on_device(device = torch.device("meta"), include_buffers :bool = False):
     
@@ -52,11 +57,40 @@ def init_weights_on_device(device = torch.device("meta"), include_buffers :bool 
         for torch_function_name, old_torch_function in tensor_constructors_to_patch.items():
             setattr(torch, torch_function_name, old_torch_function)
 
+def _normalize_tensor_name(tensor) -> str:
+    for attr in ("name", "tensor_name", "name_str"):
+        name = getattr(tensor, attr, None)
+        if name is not None:
+            return str(name)
+    raise AttributeError("Unable to determine tensor name for GGUF tensor")
+
+
+def _load_tensor_from_numpy(array, torch_dtype=None, device="cpu"):
+    import numpy as np
+
+    if array is None:
+        raise ValueError("Received None array when converting GGUF tensor")
+
+    if not isinstance(array, np.ndarray):
+        array = np.array(array)
+
+    try:
+        tensor = torch.from_numpy(array)
+    except TypeError:
+        tensor = torch.from_numpy(array.astype("float32"))
+
+    if torch_dtype is not None:
+        tensor = tensor.to(torch_dtype)
+    if device is not None:
+        tensor = tensor.to(device)
+    return tensor
+
+
 def load_state_dict_from_folder(file_path, torch_dtype=None):
     state_dict = {}
     for file_name in os.listdir(file_path):
         if "." in file_name and file_name.split(".")[-1] in [
-            "safetensors", "bin", "ckpt", "pth", "pt"
+            "safetensors", "bin", "ckpt", "pth", "pt", "gguf"
         ]:
             state_dict.update(load_state_dict(os.path.join(file_path, file_name), torch_dtype=torch_dtype))
     return state_dict
@@ -65,6 +99,8 @@ def load_state_dict_from_folder(file_path, torch_dtype=None):
 def load_state_dict(file_path, torch_dtype=None, device="cpu"):
     if file_path.endswith(".safetensors"):
         return load_state_dict_from_safetensors(file_path, torch_dtype=torch_dtype, device=device)
+    if file_path.endswith(".gguf"):
+        return load_state_dict_from_gguf(file_path, torch_dtype=torch_dtype, device=device)
     else:
         return load_state_dict_from_bin(file_path, torch_dtype=torch_dtype, device=device)
 
@@ -85,6 +121,44 @@ def load_state_dict_from_bin(file_path, torch_dtype=None, device="cpu"):
         for i in state_dict:
             if isinstance(state_dict[i], torch.Tensor):
                 state_dict[i] = state_dict[i].to(torch_dtype)
+    return state_dict
+
+
+def load_state_dict_from_gguf(file_path, torch_dtype=None, device="cpu"):
+    if gguf is None:
+        raise ImportError(
+            "The `gguf` package is required to load GGUF checkpoints. "
+            "Install it with `pip install gguf` to enable quantized model support."
+        )
+
+    print(f"[GGUF] Loading checkpoint from {file_path}")
+    reader = gguf.GGUFReader(file_path)
+    state_dict = {}
+    tensor_count = 0
+
+    for tensor in reader.tensors:
+        tensor_name = _normalize_tensor_name(tensor)
+        data = getattr(tensor, "data", None)
+
+        if callable(data):
+            data = data()
+
+        if hasattr(data, "to_numpy"):
+            array = data.to_numpy()
+        elif hasattr(data, "numpy"):
+            array = data.numpy()
+        else:
+            array = data
+
+        torch_tensor = _load_tensor_from_numpy(array, torch_dtype=torch_dtype, device=device)
+        state_dict[tensor_name] = torch_tensor
+        tensor_count += 1
+
+    print(f"[GGUF] Loaded {tensor_count} tensors from {file_path}")
+
+    if tensor_count == 0:
+        print(f"[GGUF] Warning: no tensors were read from {file_path}. Check the file integrity.")
+
     return state_dict
 
 

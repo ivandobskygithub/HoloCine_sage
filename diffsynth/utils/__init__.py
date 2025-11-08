@@ -1,13 +1,15 @@
-import torch, warnings, glob, os
-import numpy as np
-from PIL import Image
-from einops import repeat, reduce
-from typing import Optional, Union
+import glob
+import importlib
+import os
+import warnings
 from dataclasses import dataclass
-from modelscope import snapshot_download
+from typing import Optional, Sequence, Type, Union
+
 import numpy as np
+import torch
 from PIL import Image
-from typing import Optional
+from einops import reduce, repeat
+from modelscope import snapshot_download
 
 
 class BasePipeline(torch.nn.Module):
@@ -151,6 +153,42 @@ class ModelConfig:
     offload_dtype: Optional[torch.dtype] = None
     local_model_path: str = None
     skip_download: bool = False
+    lora_paths: Optional[Union[str, list[str]]] = None
+    lora_alpha: float = 1.0
+    model_names: Optional[Union[str, Sequence[str]]] = None
+    model_classes: Optional[Union[Type[torch.nn.Module], Sequence[Type[torch.nn.Module]], str, Sequence[str]]] = None
+    model_resource: Optional[str] = None
+
+    def _as_list(self, value):
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            return [item for item in value if item]
+        return [value] if value else []
+
+    def iter_lora_paths(self) -> list[str]:
+        return [str(path) for path in self._as_list(self.lora_paths)]
+
+    def iter_model_names(self) -> list[str]:
+        return [str(name) for name in self._as_list(self.model_names)]
+
+    def _resolve_model_class(self, target) -> Type[torch.nn.Module]:
+        if isinstance(target, str):
+            module_name, _, class_name = target.rpartition(".")
+            if not module_name or not class_name:
+                raise ValueError(
+                    f"Model class '{target}' must be provided as 'module_path.ClassName'."
+                )
+            module = importlib.import_module(module_name)
+            return getattr(module, class_name)
+        if isinstance(target, type) and issubclass(target, torch.nn.Module):
+            return target
+        raise TypeError(
+            "ModelConfig.model_classes entries must be torch.nn.Module subclasses or dotted-path strings."
+        )
+
+    def iter_model_classes(self) -> list[Type[torch.nn.Module]]:
+        return [self._resolve_model_class(item) for item in self._as_list(self.model_classes)]
 
     def download_if_necessary(self, use_usp=False):
         if self.path is None:

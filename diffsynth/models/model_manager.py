@@ -415,16 +415,29 @@ class ModelManager:
                 print(f"    Cannot load LoRA: {file_path}")
 
 
-    def load_model(self, file_path, model_names=None, device=None, torch_dtype=None):
+    def load_model(
+        self,
+        file_path,
+        model_names=None,
+        model_classes=None,
+        model_resource=None,
+        device=None,
+        torch_dtype=None,
+    ):
         print(f"Loading models from: {file_path}")
-        if device is None: device = self.device
-        if torch_dtype is None: torch_dtype = self.torch_dtype
+        if device is None:
+            device = self.device
+        if torch_dtype is None:
+            torch_dtype = self.torch_dtype
+        manual_model_names = model_names or []
+        manual_model_classes = model_classes or []
+        manual_resource = model_resource
         if isinstance(file_path, list):
             state_dict = {}
             for path in file_path:
-                state_dict.update(load_state_dict(path))
+                state_dict.update(load_state_dict(path, torch_dtype=torch_dtype, device=device))
         elif os.path.isfile(file_path):
-            state_dict = load_state_dict(file_path)
+            state_dict = load_state_dict(file_path, torch_dtype=torch_dtype, device=device)
         else:
             state_dict = None
         for model_detector in self.model_detector:
@@ -432,7 +445,7 @@ class ModelManager:
                 model_names, models = model_detector.load(
                     file_path, state_dict,
                     device=device, torch_dtype=torch_dtype,
-                    allowed_model_names=model_names, model_manager=self
+                    allowed_model_names=model_names, model_manager=self,
                 )
                 for model_name, model in zip(model_names, models):
                     self.model.append(model)
@@ -441,7 +454,27 @@ class ModelManager:
                 print(f"    The following models are loaded: {model_names}.")
                 break
         else:
-            print(f"    We cannot detect the model type. No models are loaded.")
+            if manual_model_names and manual_model_classes and state_dict is not None:
+                if manual_resource is None:
+                    manual_resource = "civitai"
+                loaded_names, loaded_models = load_model_from_single_file(
+                    state_dict,
+                    manual_model_names,
+                    manual_model_classes,
+                    manual_resource,
+                    torch_dtype,
+                    device,
+                )
+                for model_name, model in zip(loaded_names, loaded_models):
+                    self.model.append(model)
+                    self.model_path.append(file_path)
+                    self.model_name.append(model_name)
+                if loaded_names:
+                    print(f"    The following models are loaded: {loaded_names}.")
+                else:
+                    print(f"    No models were instantiated from override metadata for {file_path}.")
+            else:
+                print(f"    We cannot detect the model type. No models are loaded.")
         
 
     def load_models(self, file_path_list, model_names=None, device=None, torch_dtype=None):

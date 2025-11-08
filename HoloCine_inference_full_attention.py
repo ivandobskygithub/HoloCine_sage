@@ -1,7 +1,10 @@
-import torch
 import math
+
+import torch
+
 from diffsynth import save_video
-from diffsynth.pipelines.wan_video_holocine import WanVideoHoloCinePipeline, ModelConfig
+from diffsynth.models.wan_video_dit import WanModel
+from diffsynth.pipelines.wan_video_holocine import ModelConfig, WanVideoHoloCinePipeline
 
 # ---------------------------------------------------
 #                Helper Functions
@@ -178,13 +181,54 @@ def run_inference(
 
 
 # ---------------------------------------------------
-# 
+#
 #                 Script Execution
 #
 # ---------------------------------------------------
 
+USE_GGUF_MODELS = True
+LIGHTNING_LORA_SELECTION = "wan2.2-lightning"  # Options: "wan1.1-lightning", "wan2.2-lightning", or None
+LIGHTNING_LORA_ALPHA = 1.0
+
+WAN_LIGHTNING_LORA_OPTIONS = {
+    "wan2.2-lightning": "D:/development/HoloCine_sage/models/lora/Wan22_A14B_T2V_HIGH_Lightning_4steps_lora_250928_rank128_fp16.safetensors",
+    "wan1.1-lightning": "D:/development/HoloCine_sage/models/lora/Wan11_A14B_T2V_HIGH_Lightning_8steps_lora_rank128_fp16.safetensors",
+}
+
+selected_lora_path = WAN_LIGHTNING_LORA_OPTIONS.get(LIGHTNING_LORA_SELECTION)
+if selected_lora_path:
+    print(f"Using Lightning LoRA preset '{LIGHTNING_LORA_SELECTION}': {selected_lora_path}")
+else:
+    if LIGHTNING_LORA_SELECTION:
+        print(f"Lightning LoRA preset '{LIGHTNING_LORA_SELECTION}' not found or disabled. Proceeding without LoRA.")
+    else:
+        print("Lightning LoRA disabled. Proceeding without additional adapters.")
+
 # --- 1. Load Model (Done once) ---
 device = 'cuda'
+
+high_noise_checkpoint = (
+    "D:/development/HoloCine_sage/models/quantized/HoloCine-Full-HighNoise-Q4_K_M.gguf"
+    if USE_GGUF_MODELS
+    else "D:/development/HoloCine/checkpoints/HoloCine_dit/full/Holocine_full_high_e4m3_fp8.safetensors"
+)
+
+low_noise_checkpoint = (
+    "D:/development/HoloCine_sage/models/quantized/HoloCine-Full-LowNoise-Q4_K_M.gguf"
+    if USE_GGUF_MODELS
+    else "D:/development/HoloCine/checkpoints/HoloCine_dit/full/Holocine_full_low_e4m3_fp8.safetensors"
+)
+
+dit_offload_dtype = torch.float16 if USE_GGUF_MODELS else torch.float8_e4m3fn
+
+dit_override_kwargs = {}
+if USE_GGUF_MODELS:
+    dit_override_kwargs = {
+        "model_names": "wan_video_dit",
+        "model_classes": WanModel,
+        "model_resource": "civitai",
+    }
+
 pipe = WanVideoHoloCinePipeline.from_pretrained(
     torch_dtype=torch.bfloat16,
     latent_storage_dtype=torch.float8_e4m3fn,
@@ -196,14 +240,18 @@ pipe = WanVideoHoloCinePipeline.from_pretrained(
             offload_dtype=torch.bfloat16,
         ),
         ModelConfig(
-            path="D:/development/HoloCine/checkpoints/HoloCine_dit/full/Holocine_full_high_e4m3_fp8.safetensors",
+            path=high_noise_checkpoint,
             offload_device="cpu",
-            offload_dtype=torch.float8_e4m3fn,
+            offload_dtype=dit_offload_dtype,
+            lora_paths=selected_lora_path,
+            lora_alpha=LIGHTNING_LORA_ALPHA,
+            **dit_override_kwargs,
         ),
         ModelConfig(
-            path="D:/development/HoloCine/checkpoints/HoloCine_dit/full/Holocine_full_low_e4m3_fp8.safetensors",
+            path=low_noise_checkpoint,
             offload_device="cpu",
-            offload_dtype=torch.float8_e4m3fn,
+            offload_dtype=dit_offload_dtype,
+            **dit_override_kwargs,
         ),
         ModelConfig(
             path="D:/development/HoloCine/checkpoints/Wan2.2-T2V-A14B/wan_2.1_vae.safetensors",
