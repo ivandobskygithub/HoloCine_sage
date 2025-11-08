@@ -3,6 +3,8 @@ from safetensors import safe_open
 from contextlib import contextmanager
 import hashlib
 
+from .gguf_loader import load_gguf_state_dict
+
 @contextmanager
 def init_weights_on_device(device = torch.device("meta"), include_buffers :bool = False):
     
@@ -63,10 +65,11 @@ def load_state_dict_from_folder(file_path, torch_dtype=None):
 
 
 def load_state_dict(file_path, torch_dtype=None, device="cpu"):
+    if file_path.endswith(".gguf"):
+        return load_state_dict_from_gguf(file_path, torch_dtype=torch_dtype, device=device)
     if file_path.endswith(".safetensors"):
         return load_state_dict_from_safetensors(file_path, torch_dtype=torch_dtype, device=device)
-    else:
-        return load_state_dict_from_bin(file_path, torch_dtype=torch_dtype, device=device)
+    return load_state_dict_from_bin(file_path, torch_dtype=torch_dtype, device=device)
 
 
 def load_state_dict_from_safetensors(file_path, torch_dtype=None, device="cpu"):
@@ -85,6 +88,11 @@ def load_state_dict_from_bin(file_path, torch_dtype=None, device="cpu"):
         for i in state_dict:
             if isinstance(state_dict[i], torch.Tensor):
                 state_dict[i] = state_dict[i].to(torch_dtype)
+    return state_dict
+
+
+def load_state_dict_from_gguf(file_path, torch_dtype=None, device="cpu"):
+    state_dict = load_gguf_state_dict(file_path, torch_dtype=torch_dtype, device=device)
     return state_dict
 
 
