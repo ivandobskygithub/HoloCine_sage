@@ -1028,7 +1028,14 @@ class WanVideoHoloCinePipeline(BasePipeline):
                 device=model_config.offload_device or device,
                 torch_dtype=model_config.offload_dtype or torch_dtype
             )
-        
+            lora_paths = model_config.iter_lora_paths()
+            if lora_paths:
+                print(
+                    "Applying LoRA adapters from"
+                    f" {lora_paths} with alpha={model_config.lora_alpha}"
+                )
+                model_manager.load_lora(lora_paths, lora_alpha=model_config.lora_alpha)
+
         # Load models
         pipe.text_encoder = model_manager.fetch_model("wan_video_text_encoder")
         dit = model_manager.fetch_model("wan_video_dit", index=2)
