@@ -150,12 +150,16 @@ To use the full attention version.
 python HoloCine_inference_full_attention.py
 ```
 
-To launch the quantised GGUF checkpoints with an 8-step Lightning LoRA, pass the
-corresponding arguments on the command line. Replace the placeholder paths with
-the locations of your checkpoints if you do not rely on `HOLOCINE_CHECKPOINT_ROOT`.
+The script now inlines all configuration so you can quickly iterate by editing
+the toggles near the bottom of the file (for example `RUN_STRUCTURED_SCENARIO`,
+`STRUCTURED_OUTPUT_PATH`, and the prompt constants).
+
+To launch the quantised GGUF checkpoints with an 8-step Lightning LoRA, use the
+dedicated CLI helper. Replace the placeholder paths with the locations of your
+checkpoints if you do not rely on `HOLOCINE_CHECKPOINT_ROOT`.
 
 ```shell
-python HoloCine_inference_full_attention.py \
+python examples/run_full_attention_cli.py \
   --checkpoint-root /path/to/checkpoints \
   --use-quantized \
   --quant-suffix Q4_K_M \
@@ -194,23 +198,21 @@ This is the easiest way to create new multi-shot prompts. You provide the compon
 **Example (inside `HoloCine_inference_full_attention.py`):**
 
 ```python
-run_inference(
-    pipe=pipe,
-    negative_prompt=scene_negative_prompt,
-    output_path="test_structured_output.mp4",
-    
-    # Choice 1 inputs
-    global_caption="The scene is set in a lavish, 1920s Art Deco ballroom during a masquerade party. [character1] is a mysterious woman with a sleek bob, wearing a sequined silver dress and an ornate feather mask. [character2] is a dapper gentleman in a black tuxedo, his face half-hidden by a simple black domino mask. The environment is filled with champagne fountains, a live jazz band, and dancing couples in extravagant costumes. This scene contains 5 shots.",
-    shot_captions=[
-        "Medium shot of [character1] standing by a pillar, observing the crowd, a champagne flute in her hand.",
-        "Close-up of [character2] watching her from across the room, a look of intrigue on his visible features.",
-        "Medium shot as [character2] navigates the crowd and approaches [character1], offering a polite bow. ",
-        "Close-up on [character1]'s eyes through her mask, as they crinkle in a subtle, amused smile.",
-        "A stylish medium two-shot of them standing together, the swirling party out of focus behind them, as they begin to converse."
-
-    ],
-    num_frames=241
+STRUCTURED_DEMO_GLOBAL_CAPTION = (
+    "The scene is set in a lavish, 1920s Art Deco ballroom during a masquerade party. "
+    "[character1] is a mysterious woman with a sleek bob, wearing a sequined silver dress and an ornate feather mask. "
+    "[character2] is a dapper gentleman in a black tuxedo, his face half-hidden by a simple black domino mask. "
+    "The environment is filled with champagne fountains, a live jazz band, and dancing couples in extravagant costumes. "
+    "This scene contains 5 shots."
 )
+STRUCTURED_DEMO_SHOT_CAPTIONS = (
+    "Medium shot of [character1] standing by a pillar, observing the crowd, a champagne flute in her hand.",
+    "Close-up of [character2] watching her from across the room, a look of intrigue on his visible features.",
+    "Medium shot as [character2] navigates the crowd and approaches [character1], offering a polite bow.",
+    "Close-up on [character1]'s eyes through her mask, as they crinkle in a subtle, amused smile.",
+    "A stylish medium two-shot of them standing together, the swirling party out of focus behind them, as they begin to converse.",
+)
+STRUCTURED_DEMO_NUM_FRAMES = 81
 ```
 
 https://github.com/user-attachments/assets/10dba757-27dc-4f65-8fc3-b396cf466063

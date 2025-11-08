@@ -3,9 +3,9 @@ import sys
 import numpy as np
 import torch
 
+import HoloCine_inference_full_attention as full_attention
 from diffsynth.models.utils import load_state_dict
 from diffsynth.pipelines.wan_video_holocine import WanVideoHoloCinePipeline
-from HoloCine_inference_full_attention import build_model_configs
 
 
 def test_load_state_dict_from_gguf(monkeypatch, tmp_path):
@@ -59,9 +59,98 @@ def test_apply_lightning_lora_targets_all_modules(tmp_path):
 
 
 def test_build_model_configs_quant_suffix(tmp_path):
-    configs = build_model_configs(
+    configs = full_attention.build_model_configs(
         str(tmp_path),
         use_quantized=True,
         quant_suffix="Q4_K_M",
     )
     assert any(path.endswith("Q4_K_M.gguf") for path in (cfg.path for cfg in configs))
+
+
+def test_prepare_multishot_inputs_matches_structured_prompt(monkeypatch):
+    class DummyPipe:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            return "video"
+
+    pipe = DummyPipe()
+
+    saved = {}
+
+    def fake_save_video(video, output_path, fps, quality):
+        saved.update(
+            {
+                "video": video,
+                "output_path": output_path,
+                "fps": fps,
+                "quality": quality,
+            }
+        )
+
+    monkeypatch.setattr(full_attention, "save_video", fake_save_video)
+
+    base_caption = full_attention.STRUCTURED_DEMO_GLOBAL_CAPTION.replace(
+        " This scene contains 5 shots.", ""
+    )
+    shot_captions = list(full_attention.STRUCTURED_DEMO_SHOT_CAPTIONS)
+    num_frames = full_attention.STRUCTURED_DEMO_NUM_FRAMES
+
+    expected_inputs = full_attention.prepare_multishot_inputs(
+        global_caption=base_caption,
+        shot_captions=shot_captions,
+        total_frames=num_frames,
+    )
+
+    full_attention.run_inference(
+        pipe=pipe,
+        output_path="structured.mp4",
+        global_caption=base_caption,
+        shot_captions=shot_captions,
+        num_frames=num_frames,
+        negative_prompt=full_attention.DEFAULT_NEGATIVE_PROMPT,
+        num_inference_steps=28,
+    )
+
+    assert pipe.calls, "Pipeline was not invoked"
+    kwargs = pipe.calls[-1]
+    assert kwargs["prompt"] == expected_inputs["prompt"]
+    assert kwargs["num_frames"] == expected_inputs["num_frames"]
+    assert kwargs["shot_cut_frames"] == expected_inputs["shot_cut_frames"]
+    assert saved["output_path"] == "structured.mp4"
+    assert saved["fps"] == 15
+    assert saved["quality"] == 5
+
+
+def test_run_inference_respects_combined_prompt(monkeypatch):
+    class DummyPipe:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            return "video"
+
+    pipe = DummyPipe()
+
+    monkeypatch.setattr(full_attention, "save_video", lambda *args, **kwargs: None)
+
+    full_attention.run_inference(
+        pipe=pipe,
+        output_path="combined.mp4",
+        prompt=full_attention.COMBINED_DEMO_PROMPT,
+        num_frames=full_attention.COMBINED_DEMO_NUM_FRAMES,
+        shot_cut_frames=list(full_attention.COMBINED_DEMO_SHOT_CUT_FRAMES),
+        negative_prompt=full_attention.DEFAULT_NEGATIVE_PROMPT,
+        num_inference_steps=32,
+    )
+
+    assert pipe.calls, "Pipeline was not invoked"
+    kwargs = pipe.calls[-1]
+    assert kwargs["prompt"] == full_attention.COMBINED_DEMO_PROMPT
+    assert kwargs["num_frames"] == full_attention.COMBINED_DEMO_NUM_FRAMES
+    assert kwargs["shot_cut_frames"] == list(
+        full_attention.COMBINED_DEMO_SHOT_CUT_FRAMES
+    )

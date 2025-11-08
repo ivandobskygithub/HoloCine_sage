@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import argparse
-import math
 import os
 from dataclasses import dataclass
 from typing import Iterable, Optional, Sequence
 
 import torch
 from diffsynth import save_video
-from diffsynth.pipelines.wan_video_holocine import WanVideoHoloCinePipeline, ModelConfig
+from diffsynth.pipelines.wan_video_holocine import ModelConfig, WanVideoHoloCinePipeline
 
 
 @dataclass(frozen=True)
@@ -42,6 +40,39 @@ LIGHTNING_PRESETS = {
         relative_paths=("lora/Wan2.2-Lightning-8step.safetensors",),
     ),
 }
+
+
+STRUCTURED_DEMO_GLOBAL_CAPTION = (
+    "The scene is set in a lavish, 1920s Art Deco ballroom during a masquerade party. "
+    "[character1] is a mysterious woman with a sleek bob, wearing a sequined silver dress and an ornate feather mask. "
+    "[character2] is a dapper gentleman in a black tuxedo, his face half-hidden by a simple black domino mask. "
+    "The environment is filled with champagne fountains, a live jazz band, and dancing couples in extravagant costumes. "
+    "This scene contains 5 shots."
+)
+
+STRUCTURED_DEMO_SHOT_CAPTIONS = (
+    "Medium shot of [character1] standing by a pillar, observing the crowd, a champagne flute in her hand.",
+    "Close-up of [character2] watching her from across the room, a look of intrigue on his visible features.",
+    "Medium shot as [character2] navigates the crowd and approaches [character1], offering a polite bow.",
+    "Close-up on [character1]'s eyes through her mask, as they crinkle in a subtle, amused smile.",
+    "A stylish medium two-shot of them standing together, the swirling party out of focus behind them, as they begin to converse.",
+)
+
+STRUCTURED_DEMO_NUM_FRAMES = 81
+
+COMBINED_DEMO_PROMPT = (
+    "[global caption] The scene features a young painter, [character1], with paint-smudged cheeks and intense, focused eyes. "
+    "Her hair is tied up messily. The setting is a bright, sun-drenched art studio with large windows, canvases, and the smell "
+    "of oil paint. This scene contains 6 shots. [per shot caption] Medium shot of [character1] standing back from a large "
+    "canvas, brush in hand, critically observing her work. [shot cut] Close-up of her hand holding the brush, dabbing it "
+    "thoughtfully onto a palette of vibrant colors. [shot cut] Extreme close-up of her eyes, narrowed in concentration as she "
+    "studies the canvas. [shot cut] Close-up on the canvas, showing a detailed, textured brushstroke being slowly applied. "
+    "[shot cut] Medium close-up of [character1]'s face, a small, satisfied smile appears as she finds the right color. [shot cut] "
+    "Over-the-shoulder shot showing her add a final, delicate highlight to the painting."
+)
+
+COMBINED_DEMO_NUM_FRAMES = 241
+COMBINED_DEMO_SHOT_CUT_FRAMES = (37, 73, 113, 169, 205)
 
 
 def _resolve_checkpoint_path(checkpoint_root: Optional[str], path: str) -> str:
@@ -333,10 +364,10 @@ def run_inference(
     final_pipe_kwargs = {k: v for k, v in pipe_kwargs.items() if v is not None}
     
     if "prompt" not in final_pipe_kwargs:
-         raise ValueError("A 'prompt' or ('global_caption' + 'shot_captions') is required.")
+        raise ValueError("A 'prompt' or ('global_caption' + 'shot_captions') is required.")
 
     # --- 4. Run Generation ---
-    print(f"Running inference...")
+    print("Running inference...")
     if "num_frames" in final_pipe_kwargs:
         print(f"  Total frames: {final_pipe_kwargs['num_frames']}")
     if "shot_cut_frames" in final_pipe_kwargs:
@@ -361,108 +392,101 @@ DEFAULT_NEGATIVE_PROMPT = (
 )
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run HoloCine video generation.")
-    parser.add_argument("--checkpoint-root", default=os.getenv("HOLOCINE_CHECKPOINT_ROOT"))
-    parser.add_argument("--device")
-    parser.add_argument("--use-quantized", action="store_true")
-    parser.add_argument("--quant-suffix", default="Q4_K_M")
-    parser.add_argument("--lightning", choices=sorted(LIGHTNING_PRESETS.keys()))
-    parser.add_argument("--lightning-alpha", type=float, default=1.0)
-    parser.add_argument("--lightning-path", action="append", default=[])
-    parser.add_argument("--num-inference-steps", type=int)
-    parser.add_argument("--output", default="video1.mp4")
-    parser.add_argument("--prompt")
-    parser.add_argument("--global-caption")
-    parser.add_argument("--shot", action="append", default=[])
-    parser.add_argument("--num-frames", type=int)
-    parser.add_argument("--shot-cut-frame", action="append", type=int)
-    parser.add_argument("--negative-prompt")
-    parser.add_argument("--fps", type=int, default=15)
-    parser.add_argument("--quality", type=int, default=5)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--height", type=int, default=480)
-    parser.add_argument("--width", type=int, default=832)
-    parser.add_argument("--tiled", dest="tiled", action="store_true")
-    parser.add_argument("--no-tiled", dest="tiled", action="store_false")
-    parser.set_defaults(tiled=True)
-    parser.add_argument("--demo", action="store_true", help="Run the built-in showcase prompts.")
-    return parser.parse_args()
-
-
-def run_demo(pipe: WanVideoHoloCinePipeline, num_inference_steps: int, output_path: str, negative_prompt: str) -> None:
-    print("\n--- Running Example 1 (Structured Input) ---")
-    run_inference(
-        pipe=pipe,
-        negative_prompt=negative_prompt,
-        output_path=output_path,
-        global_caption=(
-            "The scene is set in a lavish, 1920s Art Deco ballroom during a masquerade party. "
-            "[character1] is a mysterious woman with a sleek bob, wearing a sequined silver dress and an ornate feather mask. "
-            "[character2] is a dapper gentleman in a black tuxedo, his face half-hidden by a simple black domino mask. "
-            "The environment is filled with champagne fountains, a live jazz band, and dancing couples in extravagant costumes. "
-            "This scene contains 5 shots."
-        ),
-        shot_captions=[
-            "Medium shot of [character1] standing by a pillar, observing the crowd, a champagne flute in her hand.",
-            "Close-up of [character2] watching her from across the room, a look of intrigue on his visible features.",
-            "Medium shot as [character2] navigates the crowd and approaches [character1], offering a polite bow.",
-            "Close-up on [character1]'s eyes through her mask, as they crinkle in a subtle, amused smile.",
-            "A stylish medium two-shot of them standing together, the swirling party out of focus behind them, as they begin to converse.",
-        ],
-        num_frames=81,
-        num_inference_steps=num_inference_steps,
-    )
-
-
-def main() -> None:
-    args = parse_args()
-
-    pipe = build_pipeline(
-        checkpoint_root=args.checkpoint_root,
-        device=args.device,
-        use_quantized=args.use_quantized,
-        quant_suffix=args.quant_suffix,
-    )
-
-    recommended_steps = apply_lightning_preset(
-        pipe,
-        args.lightning,
-        checkpoint_root=args.checkpoint_root,
-        lora_paths=args.lightning_path,
-        alpha=args.lightning_alpha,
-    )
-
-    num_inference_steps = args.num_inference_steps or recommended_steps or 50
-    negative_prompt = args.negative_prompt or DEFAULT_NEGATIVE_PROMPT
-
-    if args.demo or (not args.prompt and not args.global_caption and not args.shot):
-        run_demo(
-            pipe,
-            num_inference_steps=num_inference_steps,
-            output_path=args.output,
-            negative_prompt=negative_prompt,
-        )
-        return
-
-    run_inference(
-        pipe=pipe,
-        output_path=args.output,
-        global_caption=args.global_caption,
-        shot_captions=args.shot or None,
-        prompt=args.prompt,
-        negative_prompt=negative_prompt,
-        num_frames=args.num_frames,
-        shot_cut_frames=args.shot_cut_frame,
-        seed=args.seed,
-        tiled=args.tiled,
-        height=args.height,
-        width=args.width,
-        num_inference_steps=num_inference_steps,
-        fps=args.fps,
-        quality=args.quality,
-    )
+def _print_configuration_summary(*, use_quantized: bool, lightning: Optional[str]) -> None:
+    print("\n--- HoloCine Full Attention Configuration ---")
+    print(f"Quantized GGUF: {'enabled' if use_quantized else 'disabled'}")
+    if lightning:
+        print(f"Lightning preset: {lightning}")
+    else:
+        print("Lightning preset: none")
+    print("--------------------------------------------\n")
 
 
 if __name__ == "__main__":
-    main()
+    CHECKPOINT_ROOT = os.getenv("HOLOCINE_CHECKPOINT_ROOT", "/path/to/checkpoints")
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    USE_QUANTIZED = False
+    QUANT_SUFFIX = "Q4_K_M"
+    MODEL_OVERRIDES: dict[str, str] = {}
+
+    LIGHTNING_PRESET = None  # choose "wan1.1" or "wan2.2" when available
+    LIGHTNING_ALPHA = 1.0
+    LIGHTNING_PATHS: Sequence[str] = ()
+
+    NUM_INFERENCE_STEPS: Optional[int] = None
+    NEGATIVE_PROMPT = DEFAULT_NEGATIVE_PROMPT
+
+    HEIGHT = 480
+    WIDTH = 832
+    TILED = True
+    SEED = 0
+    FPS = 15
+    QUALITY = 5
+
+    RUN_STRUCTURED_SCENARIO = True
+    STRUCTURED_OUTPUT_PATH = "video1.mp4"
+
+    RUN_COMBINED_SCENARIO = False
+    COMBINED_OUTPUT_PATH = "video2.mp4"
+
+    print("Loading HoloCine pipeline...")
+    pipeline = build_pipeline(
+        checkpoint_root=CHECKPOINT_ROOT,
+        device=DEVICE,
+        use_quantized=USE_QUANTIZED,
+        quant_suffix=QUANT_SUFFIX,
+        model_overrides=MODEL_OVERRIDES or None,
+    )
+
+    recommended_steps: Optional[int] = None
+    if LIGHTNING_PRESET or LIGHTNING_PATHS:
+        recommended_steps = apply_lightning_preset(
+            pipeline,
+            LIGHTNING_PRESET,
+            checkpoint_root=CHECKPOINT_ROOT,
+            lora_paths=LIGHTNING_PATHS,
+            alpha=LIGHTNING_ALPHA,
+        )
+
+    _print_configuration_summary(
+        use_quantized=USE_QUANTIZED,
+        lightning=LIGHTNING_PRESET,
+    )
+
+    active_steps = NUM_INFERENCE_STEPS or recommended_steps or 50
+
+    if RUN_STRUCTURED_SCENARIO:
+        print("--- Running structured multi-shot scenario ---")
+        run_inference(
+            pipe=pipeline,
+            output_path=STRUCTURED_OUTPUT_PATH,
+            global_caption=STRUCTURED_DEMO_GLOBAL_CAPTION,
+            shot_captions=list(STRUCTURED_DEMO_SHOT_CAPTIONS),
+            num_frames=STRUCTURED_DEMO_NUM_FRAMES,
+            negative_prompt=NEGATIVE_PROMPT,
+            num_inference_steps=active_steps,
+            seed=SEED,
+            tiled=TILED,
+            height=HEIGHT,
+            width=WIDTH,
+            fps=FPS,
+            quality=QUALITY,
+        )
+
+    if RUN_COMBINED_SCENARIO:
+        print("--- Running combined prompt scenario ---")
+        run_inference(
+            pipe=pipeline,
+            output_path=COMBINED_OUTPUT_PATH,
+            prompt=COMBINED_DEMO_PROMPT,
+            num_frames=COMBINED_DEMO_NUM_FRAMES,
+            shot_cut_frames=list(COMBINED_DEMO_SHOT_CUT_FRAMES),
+            negative_prompt=NEGATIVE_PROMPT,
+            num_inference_steps=active_steps,
+            seed=SEED,
+            tiled=TILED,
+            height=HEIGHT,
+            width=WIDTH,
+            fps=FPS,
+            quality=QUALITY,
+        )
