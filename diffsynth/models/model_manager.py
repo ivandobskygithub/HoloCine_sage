@@ -1,3 +1,4 @@
+import math
 import os, torch, json, importlib
 from typing import List
 
@@ -100,6 +101,95 @@ def _extract_wan_config_from_state_dict(state_dict):
     return config
 
 
+def _infer_wan_kwargs(state_dict, overrides=None):
+    overrides = dict(overrides or {})
+    inferred = {}
+
+    config = _extract_wan_config_from_state_dict(state_dict)
+
+    dim = config.get("dim")
+    if dim is not None:
+        inferred["dim"] = dim
+
+    in_dim = config.get("in_dim")
+    if in_dim is not None:
+        inferred["in_dim"] = in_dim
+
+    patch_size = config.get("patch_size")
+    if patch_size is not None:
+        inferred["patch_size"] = tuple(int(v) for v in patch_size)
+
+    ffn_dim = config.get("ffn_dim")
+    if ffn_dim is not None:
+        inferred["ffn_dim"] = ffn_dim
+
+    out_dim = config.get("out_dim")
+    if out_dim is not None:
+        inferred["out_dim"] = out_dim
+
+    text_dim = config.get("text_dim")
+    if text_dim is not None:
+        inferred["text_dim"] = text_dim
+
+    freq_dim = config.get("freq_dim")
+    if freq_dim is not None:
+        inferred["freq_dim"] = freq_dim
+
+    num_layers = config.get("num_layers")
+    if num_layers is not None:
+        inferred["num_layers"] = num_layers
+
+    q_shape = config.get("self_attn_q_shape")
+    if dim is not None and q_shape is not None:
+        _, q_in = q_shape
+        head_dim = math.gcd(dim, q_in) if q_in else 0
+        if head_dim:
+            num_heads = dim // head_dim
+            if num_heads == 0:
+                num_heads = 1
+            inferred["num_heads"] = num_heads
+
+    if "num_heads" not in inferred and dim is not None and dim > 0:
+        inferred["num_heads"] = max(1, dim // 128)
+
+    inferred["eps"] = overrides.get("eps", 1e-6)
+
+    has_image_input = any(name.startswith("img_emb") for name in state_dict)
+    inferred["has_image_input"] = has_image_input if "has_image_input" not in overrides else overrides["has_image_input"]
+
+    if any(name.startswith("img_emb.emb_pos") for name in state_dict):
+        inferred["has_image_pos_emb"] = True
+
+    if any(name.startswith("ref_conv") for name in state_dict):
+        inferred["has_ref_conv"] = True
+
+    if any(name.startswith("control_adapter") for name in state_dict):
+        inferred["add_control_adapter"] = True
+        conv_weight = state_dict.get("control_adapter.conv.weight")
+        if conv_weight is not None and conv_weight.ndim >= 2:
+            inferred["in_dim_control_adapter"] = max(1, int(conv_weight.shape[1] // 64))
+    elif "add_control_adapter" not in overrides:
+        inferred["add_control_adapter"] = False
+        if "in_dim_control_adapter" not in overrides:
+            inferred["in_dim_control_adapter"] = 24
+
+    default_bools = {
+        "seperated_timestep": False,
+        "require_vae_embedding": True,
+        "fuse_vae_embedding_in_latents": False,
+    }
+    if "require_clip_embedding" not in overrides:
+        inferred["require_clip_embedding"] = True
+
+    for key, value in default_bools.items():
+        if key not in overrides:
+            inferred[key] = value
+
+    final_kwargs = dict(inferred)
+    final_kwargs.update(overrides)
+    return final_kwargs
+
+
 def _raise_wan_shape_error(model, state_dict, exc):
     first_block = model.blocks[0] if model.blocks else None
     observed = {
@@ -179,6 +269,8 @@ def load_model_from_single_file(
             model_state_dict, extra_kwargs = state_dict_results, {}
         manual_kwargs = expanded_manual_kwargs[idx] if idx < len(expanded_manual_kwargs) else {}
         combined_kwargs = {**extra_kwargs, **manual_kwargs}
+        if issubclass(model_class, WanModel):
+            combined_kwargs = _infer_wan_kwargs(model_state_dict, combined_kwargs)
         torch_dtype = torch.float32 if extra_kwargs.get("upcast_to_float32", False) else torch_dtype
         with init_weights_on_device():
             model = model_class(**combined_kwargs)
