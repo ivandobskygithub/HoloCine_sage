@@ -1,5 +1,6 @@
 import math
-from typing import List, Optional, Sequence, Tuple
+import re
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -1012,140 +1013,245 @@ class WanModelStateDictConverter:
                 "require_clip_embedding": False,
             }
         else:
-            config = self._infer_config_from_state_dict(converted_state_dict or state_dict)
-            if passthrough_keys:
+            state_dict = self._cleanup_quantization_metadata(state_dict)
+            inferred_config = self._infer_config_from_shapes(state_dict)
+            if inferred_config:
                 print(
-                    "    WanModelStateDictConverter: detected native Wan parameter layout;"
-                    f" using shape-based config inference. Matched {len(passthrough_keys)} keys."
+                    "    Detected Wan GGUF checkpoint via heuristic key matching; "
+                    "falling back to shape-based configuration inference."
                 )
-            if ignored_keys:
                 print(
-                    "    WanModelStateDictConverter: ignoring unsupported keys: "
-                    + ", ".join(sorted(ignored_keys)[:10])
-                    + (" ..." if len(ignored_keys) > 10 else "")
+                    "        WanModelStateDictConverter: inferred config "
+                    f"dim={inferred_config.get('dim')}, layers={inferred_config.get('num_layers')}, "
+                    f"heads={inferred_config.get('num_heads')}, "
+                    f"has_image_input={inferred_config.get('has_image_input')}, "
+                    f"fused_latents={inferred_config.get('fuse_vae_embedding_in_latents', False)}."
                 )
-        return converted_state_dict or state_dict, config
+                state_dict = self._fuse_factorized_linears(state_dict, inferred_config)
+                state_dict = self._drop_factorisation_artifacts(state_dict)
+                config = inferred_config
+            else:
+                config = {}
+        return state_dict, config
 
-    @staticmethod
-    def _is_native_parameter_key(name: str) -> bool:
-        if not isinstance(name, str):
-            return False
-        suffix = name.rsplit(".", 1)[-1]
-        if suffix not in {"weight", "bias", "modulation", "emb_pos"}:
-            return False
-        prefix = name.split(".")[0]
-        if prefix in {
-            "patch_embedding",
-            "text_embedding",
-            "time_embedding",
-            "time_projection",
-            "blocks",
-            "head",
-            "img_emb",
-            "ref_conv",
-            "control_adapter",
-        }:
-            return True
-        return False
+    def _cleanup_quantization_metadata(self, state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        cleanup_suffixes = (
+            ".weight_scale",
+            ".weight_scales",
+            ".weight_zero",
+            ".weight_zeros",
+            ".scales",
+            ".zeros",
+        )
+        cleanup_substrings = (
+            ".qweight",
+            ".qzeros",
+            ".quantized",
+            ".packed",
+        )
+        to_remove = [
+            key
+            for key in list(state_dict.keys())
+            if any(key.endswith(suffix) for suffix in cleanup_suffixes)
+            or any(substr in key for substr in cleanup_substrings)
+        ]
+        for key in to_remove:
+            state_dict.pop(key, None)
+        return state_dict
 
-    def _infer_config_from_state_dict(self, state_dict):
-        required_keys = {
+    def _infer_config_from_shapes(self, state_dict: Dict[str, torch.Tensor]) -> Dict[str, int]:
+        required_keys = (
             "patch_embedding.weight",
-            "text_embedding.0.weight",
             "time_embedding.0.weight",
+            "text_embedding.0.weight",
             "head.head.weight",
-        }
-        missing = [key for key in required_keys if key not in state_dict]
-        if missing:
-            raise KeyError(
-                "Cannot infer Wan configuration – missing parameters: " + ", ".join(missing)
-            )
+        )
+        if not all(key in state_dict for key in required_keys):
+            return {}
 
         patch_weight = state_dict["patch_embedding.weight"]
         if patch_weight.ndim != 5:
-            raise ValueError("Unexpected patch embedding shape; expected 5D tensor.")
+            return {}
+        dim = int(patch_weight.shape[0])
+        in_dim = int(patch_weight.shape[1])
+        patch_size = tuple(int(s) for s in patch_weight.shape[2:])
 
-        dim = patch_weight.shape[0]
-        in_dim = patch_weight.shape[1]
-        patch_size = list(patch_weight.shape[2:])
+        q_bias = state_dict.get("blocks.0.self_attn.q.bias")
+        norm_weight = state_dict.get("blocks.0.norm1.weight")
+        if q_bias is not None:
+            dim = int(q_bias.shape[0])
+        elif norm_weight is not None:
+            dim = int(norm_weight.shape[0])
+
+        time_weight = state_dict["time_embedding.0.weight"]
+        freq_dim = int(time_weight.shape[1])
+
+        text_weight = state_dict["text_embedding.0.weight"]
+        text_dim = int(text_weight.shape[1])
+
         head_weight = state_dict["head.head.weight"]
-        patch_volume = math.prod(patch_size)
-        if head_weight.shape[0] % patch_volume != 0:
-            raise ValueError("Head weight is not divisible by patch volume; cannot infer out_dim.")
-        out_dim = head_weight.shape[0] // patch_volume
+        patch_volume = int(patch_size[0] * patch_size[1] * patch_size[2])
+        out_dim = int(head_weight.shape[0] // patch_volume)
 
-        ffn_key = "blocks.0.ffn.0.weight"
-        if ffn_key not in state_dict:
-            raise KeyError("Cannot infer Wan configuration – missing FFN weights.")
-        ffn_dim = state_dict[ffn_key].shape[0]
+        ffn_bias = state_dict.get("blocks.0.ffn.0.bias")
+        ffn_weight = state_dict.get("blocks.0.ffn.0.weight")
+        if ffn_bias is not None:
+            ffn_dim = int(ffn_bias.shape[0])
+        elif ffn_weight is not None:
+            ffn_dim = int(ffn_weight.shape[0])
+        else:
+            return {}
 
-        text_dim = state_dict["text_embedding.0.weight"].shape[1]
-        freq_dim = state_dict["time_embedding.0.weight"].shape[1]
+        block_pattern = re.compile(r"^blocks\.(\d+)\.")
+        block_indices = {
+            int(match.group(1))
+            for key in state_dict
+            for match in [block_pattern.match(key)]
+            if match is not None
+        }
+        if not block_indices:
+            return {}
+        num_layers = max(block_indices) + 1
 
-        block_indices = set()
-        for key in state_dict:
-            if not isinstance(key, str):
-                continue
-            if not key.startswith("blocks."):
-                continue
-            parts = key.split(".")
-            if len(parts) < 2:
-                continue
-            if parts[1].isdigit():
-                block_indices.add(int(parts[1]))
-        num_layers = (max(block_indices) + 1) if block_indices else 0
+        q_weight = state_dict.get("blocks.0.self_attn.q.weight")
+        num_heads = None
+        if q_weight is not None and q_weight.ndim == 2 and q_weight.shape[0] == dim:
+            candidate_head_dims: Iterable[int] = (64, 72, 80, 96, 112, 128, 160)
+            for head_dim in candidate_head_dims:
+                if dim % head_dim == 0:
+                    num_heads = dim // head_dim
+                    break
+        if num_heads is None:
+            if dim == 5120:
+                num_heads = 40
+            elif dim == 3072:
+                num_heads = 24
+            elif dim == 1536:
+                num_heads = 12
+            else:
+                num_heads = max(1, dim // 128)
 
-        num_heads = max(1, dim // 128)
-
-        has_image_input = any(isinstance(key, str) and key.startswith("img_emb.") for key in state_dict)
+        has_image_input = any(key.startswith("img_emb.") for key in state_dict)
         has_image_pos_emb = "img_emb.emb_pos" in state_dict
-        has_ref_conv = any(isinstance(key, str) and key.startswith("ref_conv") for key in state_dict)
-        add_control_adapter = any(
-            isinstance(key, str) and key.startswith("control_adapter.") for key in state_dict
-        )
-        in_dim_control_adapter = 24
-        control_adapter_weight = state_dict.get("control_adapter.conv.weight")
-        if control_adapter_weight is not None and control_adapter_weight.ndim >= 2:
-            in_dim_control_adapter = control_adapter_weight.shape[1]
+        has_ref_conv = any(key.startswith("ref_conv.") for key in state_dict)
+        add_control_adapter = any(key.startswith("control_adapter.") for key in state_dict)
+        control_adapter_weight = state_dict.get("control_adapter.layers.0.weight")
+        if control_adapter_weight is not None:
+            in_dim_control_adapter = int(control_adapter_weight.shape[1])
+        else:
+            in_dim_control_adapter = 24
 
-        config = {
+        config: Dict[str, int] = {
             "has_image_input": has_image_input,
-            "has_image_pos_emb": has_image_pos_emb,
-            "has_ref_conv": has_ref_conv,
-            "add_control_adapter": add_control_adapter,
-            "in_dim_control_adapter": in_dim_control_adapter,
-            "patch_size": patch_size,
+            "patch_size": list(patch_size),
             "in_dim": in_dim,
             "dim": dim,
             "ffn_dim": ffn_dim,
             "freq_dim": freq_dim,
             "text_dim": text_dim,
             "out_dim": out_dim,
-            "num_heads": num_heads,
+            "num_heads": int(num_heads),
             "num_layers": num_layers,
             "eps": 1e-6,
         }
-
+        if has_image_pos_emb:
+            config["has_image_pos_emb"] = True
+        if has_ref_conv:
+            config["has_ref_conv"] = True
+        if add_control_adapter:
+            config["add_control_adapter"] = True
+            config["in_dim_control_adapter"] = in_dim_control_adapter
         if not has_image_input:
-            # Wan 2.2 style checkpoints fuse VAE latents directly into the DiT when
-            # both the input and output channel counts exceed the standard 16
-            # latent channels.
-            if out_dim >= 32 or in_dim >= 32:
-                config.update(
-                    {
-                        "require_clip_embedding": False,
-                        "require_vae_embedding": False,
-                        "fuse_vae_embedding_in_latents": True,
-                        "seperated_timestep": True,
-                    }
-                )
-            else:
-                config.setdefault("require_clip_embedding", False)
-
-        print(
-            "    WanModelStateDictConverter: inferred config "
-            f"dim={dim}, layers={num_layers}, heads={num_heads}, has_image_input={has_image_input}, "
-            f"fused_latents={config.get('fuse_vae_embedding_in_latents', False)}."
-        )
-
+            config["require_clip_embedding"] = False
         return config
+
+    def _drop_factorisation_artifacts(self, state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        artifact_suffixes = (".weight_u", ".weight_v", ".weight_proj")
+        keys_to_remove = [
+            key
+            for key in list(state_dict.keys())
+            if any(key.endswith(suffix) for suffix in artifact_suffixes)
+        ]
+        for key in keys_to_remove:
+            state_dict.pop(key, None)
+        return state_dict
+
+    def _fuse_factorized_linears(
+        self, state_dict: Dict[str, torch.Tensor], config: Dict[str, int]
+    ) -> Dict[str, torch.Tensor]:
+        dim = config.get("dim")
+        ffn_dim = config.get("ffn_dim")
+        num_layers = config.get("num_layers", 0)
+        if dim is None or ffn_dim is None:
+            return state_dict
+
+        def fuse_linear(prefix: str, expected_out: int, expected_in: int) -> None:
+            base_key = f"{prefix}.weight"
+            related = [
+                key
+                for key in state_dict.keys()
+                if key == base_key or key.startswith(base_key + ".")
+            ]
+            matrices = [
+                (key, state_dict[key])
+                for key in related
+                if isinstance(state_dict[key], torch.Tensor) and state_dict[key].ndim == 2
+            ]
+            if len(matrices) <= 1:
+                return
+
+            fused = self._chain_multiply(matrices, expected_out, expected_in)
+            if fused is None:
+                return
+            state_dict[base_key] = fused
+            for key, _tensor in matrices:
+                if key != base_key:
+                    state_dict.pop(key, None)
+
+        for layer in range(num_layers):
+            sa_prefix = f"blocks.{layer}.self_attn"
+            ca_prefix = f"blocks.{layer}.cross_attn"
+            fuse_linear(f"{sa_prefix}.q", dim, dim)
+            fuse_linear(f"{sa_prefix}.k", dim, dim)
+            fuse_linear(f"{sa_prefix}.v", dim, dim)
+            fuse_linear(f"{sa_prefix}.o", dim, dim)
+            fuse_linear(f"{ca_prefix}.q", dim, dim)
+            fuse_linear(f"{ca_prefix}.k", dim, dim)
+            fuse_linear(f"{ca_prefix}.v", dim, dim)
+            fuse_linear(f"{ca_prefix}.o", dim, dim)
+            fuse_linear(f"blocks.{layer}.ffn.0", ffn_dim, dim)
+            fuse_linear(f"blocks.{layer}.ffn.2", dim, ffn_dim)
+
+        return state_dict
+
+    def _chain_multiply(
+        self,
+        matrices: List[Tuple[str, torch.Tensor]],
+        expected_out: int,
+        expected_in: int,
+    ) -> Optional[torch.Tensor]:
+        remaining = matrices.copy()
+        start_idx = next(
+            (idx for idx, (_key, tensor) in enumerate(remaining) if tensor.shape[0] == expected_out),
+            None,
+        )
+        if start_idx is None:
+            return None
+        _, current = remaining.pop(start_idx)
+        current = current.to(torch.float32)
+        current_in = current.shape[1]
+
+        while remaining and current_in != expected_in:
+            next_idx = next(
+                (idx for idx, (_key, tensor) in enumerate(remaining) if tensor.shape[0] == current_in),
+                None,
+            )
+            if next_idx is None:
+                return None
+            _, next_tensor = remaining.pop(next_idx)
+            current = current @ next_tensor.to(torch.float32)
+            current_in = current.shape[1]
+
+        if current_in != expected_in:
+            return None
+        return current
