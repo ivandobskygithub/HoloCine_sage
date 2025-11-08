@@ -1,8 +1,12 @@
-import math
+import os
+from functools import lru_cache
+from typing import Dict
 
 import torch
 
 from diffsynth import save_video
+from diffsynth.models import model_manager as wan_model_manager
+from diffsynth.models import utils as model_utils
 from diffsynth.models.wan_video_dit import WanModel
 from diffsynth.pipelines.wan_video_holocine import ModelConfig, WanVideoHoloCinePipeline
 
@@ -186,20 +190,8 @@ def run_inference(
 #
 # ---------------------------------------------------
 
-USE_GGUF_MODELS = True
-LIGHTNING_LORA_SELECTION = "wan2.2-lightning"  # Options: "wan1.1-lightning", "wan2.2-lightning", or None
-LIGHTNING_LORA_ALPHA = 1.0
 
-WAN_LIGHTNING_LORA_OPTIONS = {
-    "wan2.2-lightning": "D:/development/HoloCine_sage/models/lora/Wan22_A14B_T2V_HIGH_Lightning_4steps_lora_250928_rank128_fp16.safetensors",
-    "wan1.1-lightning": "D:/development/HoloCine_sage/models/lora/Wan11_A14B_T2V_HIGH_Lightning_8steps_lora_rank128_fp16.safetensors",
-}
-
-selected_lora_path = WAN_LIGHTNING_LORA_OPTIONS.get(LIGHTNING_LORA_SELECTION)
-if selected_lora_path:
-    print(f"Using Lightning LoRA preset '{LIGHTNING_LORA_SELECTION}': {selected_lora_path}")
-
-WAN_GGUF_DIT_INIT = {
+WAN_DIT_FALLBACK_KWARGS: Dict[str, Dict[str, object]] = {
     "wan_video_dit": {
         "dim": 5120,
         "in_dim": 16,
@@ -222,6 +214,64 @@ WAN_GGUF_DIT_INIT = {
         "fuse_vae_embedding_in_latents": False,
     }
 }
+
+
+def _clone_wan_dit_fallback() -> Dict[str, Dict[str, object]]:
+    return {name: dict(config) for name, config in WAN_DIT_FALLBACK_KWARGS.items()}
+
+
+@lru_cache(maxsize=None)
+def _infer_wan_dit_kwargs(checkpoint_path: str) -> Dict[str, object]:
+    state_dict = model_utils.load_state_dict(
+        checkpoint_path, torch_dtype=torch.float32, device="cpu"
+    )
+    inferred = wan_model_manager._infer_wan_kwargs(state_dict)
+    print(f"Inferred WAN config from '{checkpoint_path}': {inferred}")
+    return dict(inferred)
+
+
+def resolve_wan_model_kwargs(checkpoint_path: str) -> Dict[str, Dict[str, object]]:
+    fallback = _clone_wan_dit_fallback()
+    if not checkpoint_path:
+        return fallback
+    normalized_path = os.path.abspath(os.path.expanduser(checkpoint_path))
+    if not os.path.exists(normalized_path):
+        print(
+            f"Warning: checkpoint '{checkpoint_path}' not found. Using fallback WAN configuration."
+        )
+        return fallback
+    try:
+        inferred = _infer_wan_dit_kwargs(normalized_path)
+    except Exception as exc:
+        print(
+            "Warning: Failed to infer WAN configuration from"
+            f" '{checkpoint_path}'. Using fallback values. Reason: {exc}"
+        )
+        return fallback
+    return {"wan_video_dit": inferred}
+
+
+def build_wan_model_overrides(checkpoint_path: str) -> Dict[str, object]:
+    overrides: Dict[str, object] = {
+        "model_names": "wan_video_dit",
+        "model_classes": WanModel,
+        "model_resource": "civitai",
+        "model_kwargs": resolve_wan_model_kwargs(checkpoint_path),
+    }
+    return overrides
+
+USE_GGUF_MODELS = True
+LIGHTNING_LORA_SELECTION = "wan2.2-lightning"  # Options: "wan1.1-lightning", "wan2.2-lightning", or None
+LIGHTNING_LORA_ALPHA = 1.0
+
+WAN_LIGHTNING_LORA_OPTIONS = {
+    "wan2.2-lightning": "D:/development/HoloCine_sage/models/lora/Wan22_A14B_T2V_HIGH_Lightning_4steps_lora_250928_rank128_fp16.safetensors",
+    "wan1.1-lightning": "D:/development/HoloCine_sage/models/lora/Wan11_A14B_T2V_HIGH_Lightning_8steps_lora_rank128_fp16.safetensors",
+}
+
+selected_lora_path = WAN_LIGHTNING_LORA_OPTIONS.get(LIGHTNING_LORA_SELECTION)
+if selected_lora_path:
+    print(f"Using Lightning LoRA preset '{LIGHTNING_LORA_SELECTION}': {selected_lora_path}")
 else:
     if LIGHTNING_LORA_SELECTION:
         print(f"Lightning LoRA preset '{LIGHTNING_LORA_SELECTION}' not found or disabled. Proceeding without LoRA.")
@@ -245,14 +295,8 @@ low_noise_checkpoint = (
 
 dit_offload_dtype = torch.float16 if USE_GGUF_MODELS else torch.float8_e4m3fn
 
-dit_override_kwargs = {}
-if USE_GGUF_MODELS:
-    dit_override_kwargs = {
-        "model_names": "wan_video_dit",
-        "model_classes": WanModel,
-        "model_resource": "civitai",
-        "model_kwargs": WAN_GGUF_DIT_INIT,
-    }
+dit_override_kwargs_high = build_wan_model_overrides(high_noise_checkpoint)
+dit_override_kwargs_low = build_wan_model_overrides(low_noise_checkpoint)
 
 pipe = WanVideoHoloCinePipeline.from_pretrained(
     torch_dtype=torch.bfloat16,
@@ -270,13 +314,13 @@ pipe = WanVideoHoloCinePipeline.from_pretrained(
             offload_dtype=dit_offload_dtype,
             lora_paths=selected_lora_path,
             lora_alpha=LIGHTNING_LORA_ALPHA,
-            **dit_override_kwargs,
+            **dit_override_kwargs_high,
         ),
         ModelConfig(
             path=low_noise_checkpoint,
             offload_device="cpu",
             offload_dtype=dit_offload_dtype,
-            **dit_override_kwargs,
+            **dit_override_kwargs_low,
         ),
         ModelConfig(
             path="D:/development/HoloCine/checkpoints/Wan2.2-T2V-A14B/wan_2.1_vae.safetensors",

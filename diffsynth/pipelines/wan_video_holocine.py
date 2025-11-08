@@ -1046,6 +1046,12 @@ class WanVideoHoloCinePipeline(BasePipeline):
         # Load models
         pipe.text_encoder = model_manager.fetch_model("wan_video_text_encoder")
         dit = model_manager.fetch_model("wan_video_dit", index=2)
+        if dit is None or (isinstance(dit, list) and len(dit) == 0):
+            raise RuntimeError(
+                "WanVideoHoloCinePipeline expected at least one 'wan_video_dit' model. "
+                "Ensure that the DiT checkpoints are listed in your ModelConfig and that GGUF "
+                "files include model_names/model_classes/model_kwargs overrides."
+            )
         if isinstance(dit, list):
             pipe.dit, pipe.dit2 = dit
         else:
