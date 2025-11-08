@@ -744,6 +744,8 @@ class WanModelStateDictConverter:
             "proj_out.weight": "head.head.weight",
         }
         state_dict_ = {}
+        passthrough_keys = []
+        ignored_keys = []
         for name, param in state_dict.items():
             if name in rename_dict:
                 state_dict_[rename_dict[name]] = param
@@ -753,6 +755,11 @@ class WanModelStateDictConverter:
                     name_ = rename_dict[name_]
                     name_ = ".".join(name_.split(".")[:1] + [name.split(".")[1]] + name_.split(".")[2:])
                     state_dict_[name_] = param
+                elif self._is_native_parameter_key(name):
+                    state_dict_[name] = param
+                    passthrough_keys.append(name)
+                else:
+                    ignored_keys.append(name)
         if hash_state_dict_keys(state_dict) == "cb104773c6c2cb6df4f9529ad5c60d0b":
             config = {
                 "model_type": "t2v",
@@ -777,6 +784,15 @@ class WanModelStateDictConverter:
     
     def from_civitai(self, state_dict):
         state_dict = {name: param for name, param in state_dict.items() if not name.startswith("vace")}
+        converted_state_dict = {}
+        passthrough_keys = []
+        ignored_keys = []
+        for name, param in state_dict.items():
+            if self._is_native_parameter_key(name):
+                converted_state_dict[name] = param
+                passthrough_keys.append(name)
+            else:
+                ignored_keys.append(name)
         if hash_state_dict_keys(state_dict) == "9269f8db9040a9d860eaca435be61814":
             config = {
                 "has_image_input": False,
@@ -996,5 +1012,140 @@ class WanModelStateDictConverter:
                 "require_clip_embedding": False,
             }
         else:
-            config = {}
-        return state_dict, config
+            config = self._infer_config_from_state_dict(converted_state_dict or state_dict)
+            if passthrough_keys:
+                print(
+                    "    WanModelStateDictConverter: detected native Wan parameter layout;"
+                    f" using shape-based config inference. Matched {len(passthrough_keys)} keys."
+                )
+            if ignored_keys:
+                print(
+                    "    WanModelStateDictConverter: ignoring unsupported keys: "
+                    + ", ".join(sorted(ignored_keys)[:10])
+                    + (" ..." if len(ignored_keys) > 10 else "")
+                )
+        return converted_state_dict or state_dict, config
+
+    @staticmethod
+    def _is_native_parameter_key(name: str) -> bool:
+        if not isinstance(name, str):
+            return False
+        suffix = name.rsplit(".", 1)[-1]
+        if suffix not in {"weight", "bias", "modulation", "emb_pos"}:
+            return False
+        prefix = name.split(".")[0]
+        if prefix in {
+            "patch_embedding",
+            "text_embedding",
+            "time_embedding",
+            "time_projection",
+            "blocks",
+            "head",
+            "img_emb",
+            "ref_conv",
+            "control_adapter",
+        }:
+            return True
+        return False
+
+    def _infer_config_from_state_dict(self, state_dict):
+        required_keys = {
+            "patch_embedding.weight",
+            "text_embedding.0.weight",
+            "time_embedding.0.weight",
+            "head.head.weight",
+        }
+        missing = [key for key in required_keys if key not in state_dict]
+        if missing:
+            raise KeyError(
+                "Cannot infer Wan configuration – missing parameters: " + ", ".join(missing)
+            )
+
+        patch_weight = state_dict["patch_embedding.weight"]
+        if patch_weight.ndim != 5:
+            raise ValueError("Unexpected patch embedding shape; expected 5D tensor.")
+
+        dim = patch_weight.shape[0]
+        in_dim = patch_weight.shape[1]
+        patch_size = list(patch_weight.shape[2:])
+        head_weight = state_dict["head.head.weight"]
+        patch_volume = math.prod(patch_size)
+        if head_weight.shape[0] % patch_volume != 0:
+            raise ValueError("Head weight is not divisible by patch volume; cannot infer out_dim.")
+        out_dim = head_weight.shape[0] // patch_volume
+
+        ffn_key = "blocks.0.ffn.0.weight"
+        if ffn_key not in state_dict:
+            raise KeyError("Cannot infer Wan configuration – missing FFN weights.")
+        ffn_dim = state_dict[ffn_key].shape[0]
+
+        text_dim = state_dict["text_embedding.0.weight"].shape[1]
+        freq_dim = state_dict["time_embedding.0.weight"].shape[1]
+
+        block_indices = set()
+        for key in state_dict:
+            if not isinstance(key, str):
+                continue
+            if not key.startswith("blocks."):
+                continue
+            parts = key.split(".")
+            if len(parts) < 2:
+                continue
+            if parts[1].isdigit():
+                block_indices.add(int(parts[1]))
+        num_layers = (max(block_indices) + 1) if block_indices else 0
+
+        num_heads = max(1, dim // 128)
+
+        has_image_input = any(isinstance(key, str) and key.startswith("img_emb.") for key in state_dict)
+        has_image_pos_emb = "img_emb.emb_pos" in state_dict
+        has_ref_conv = any(isinstance(key, str) and key.startswith("ref_conv") for key in state_dict)
+        add_control_adapter = any(
+            isinstance(key, str) and key.startswith("control_adapter.") for key in state_dict
+        )
+        in_dim_control_adapter = 24
+        control_adapter_weight = state_dict.get("control_adapter.conv.weight")
+        if control_adapter_weight is not None and control_adapter_weight.ndim >= 2:
+            in_dim_control_adapter = control_adapter_weight.shape[1]
+
+        config = {
+            "has_image_input": has_image_input,
+            "has_image_pos_emb": has_image_pos_emb,
+            "has_ref_conv": has_ref_conv,
+            "add_control_adapter": add_control_adapter,
+            "in_dim_control_adapter": in_dim_control_adapter,
+            "patch_size": patch_size,
+            "in_dim": in_dim,
+            "dim": dim,
+            "ffn_dim": ffn_dim,
+            "freq_dim": freq_dim,
+            "text_dim": text_dim,
+            "out_dim": out_dim,
+            "num_heads": num_heads,
+            "num_layers": num_layers,
+            "eps": 1e-6,
+        }
+
+        if not has_image_input:
+            # Wan 2.2 style checkpoints fuse VAE latents directly into the DiT when
+            # both the input and output channel counts exceed the standard 16
+            # latent channels.
+            if out_dim >= 32 or in_dim >= 32:
+                config.update(
+                    {
+                        "require_clip_embedding": False,
+                        "require_vae_embedding": False,
+                        "fuse_vae_embedding_in_latents": True,
+                        "seperated_timestep": True,
+                    }
+                )
+            else:
+                config.setdefault("require_clip_embedding", False)
+
+        print(
+            "    WanModelStateDictConverter: inferred config "
+            f"dim={dim}, layers={num_layers}, heads={num_heads}, has_image_input={has_image_input}, "
+            f"fused_latents={config.get('fuse_vae_embedding_in_latents', False)}."
+        )
+
+        return config

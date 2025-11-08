@@ -42,6 +42,7 @@ from .flux_dit import FluxDiT
 from .flux_text_encoder import FluxTextEncoder2
 from .flux_vae import FluxVAEEncoder, FluxVAEDecoder
 from .flux_ipadapter import FluxIpAdapter
+from .wan_video_dit import WanModel
 
 from .cog_vae import CogVAEEncoder, CogVAEDecoder
 from .cog_dit import CogDiT
@@ -336,6 +337,47 @@ class ModelDetectorFromPatchedSingleFile:
 
 
 
+class WanGGUFDetector(ModelDetectorTemplate):
+    """Detect Wan GGUF checkpoints using structural heuristics."""
+
+    REQUIRED_KEYS = {
+        "patch_embedding.weight",
+        "time_embedding.0.weight",
+        "text_embedding.0.weight",
+        "head.head.weight",
+        "blocks.0.self_attn.q.weight",
+        "blocks.0.ffn.0.weight",
+    }
+
+    def match(self, file_path="", state_dict={}):
+        if not isinstance(file_path, str) or not file_path.endswith(".gguf"):
+            return False
+        if not isinstance(state_dict, dict) or len(state_dict) == 0:
+            return False
+        available_keys = {key for key in state_dict if isinstance(key, str)}
+        return self.REQUIRED_KEYS.issubset(available_keys)
+
+    def load(
+        self,
+        file_path="",
+        state_dict={},
+        device="cuda",
+        torch_dtype=torch.float16,
+        **kwargs,
+    ):
+        print(
+            "    Detected Wan GGUF checkpoint via heuristic key matching; falling back to shape-based configuration inference."
+        )
+        return load_model_from_single_file(
+            state_dict,
+            ["wan_video_dit"],
+            [WanModel],
+            "civitai",
+            torch_dtype,
+            device,
+        )
+
+
 class ModelManager:
     def __init__(
         self,
@@ -356,6 +398,7 @@ class ModelManager:
             ModelDetectorFromSplitedSingleFile(model_loader_configs),
             ModelDetectorFromHuggingfaceFolder(huggingface_model_loader_configs),
             ModelDetectorFromPatchedSingleFile(patch_model_loader_configs),
+            WanGGUFDetector(),
         ]
         self.load_models(downloaded_files + file_path_list)
 
