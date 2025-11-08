@@ -1224,7 +1224,15 @@ class WanVideoHoloCinePipeline(BasePipeline):
         inputs_nega["text_cut_positions"]['shots']=[]
         # Denoise
         self.load_models_to_device(self.in_iteration_models)
+        primary_dit = self.dit if self.dit is not None else self.dit2
+        if primary_dit is None:
+            raise RuntimeError(
+                "WanVideoHoloCinePipeline requires at least one DiT model to be loaded. "
+                "Ensure the checkpoint bundle contains a 'wan_video_dit' weight file."
+            )
+
         models = {name: getattr(self, name) for name in self.in_iteration_models}
+        models["dit"] = primary_dit
         num_progress_steps = len(self.scheduler.timesteps)
         for progress_id, timestep in enumerate(progress_bar_cmd(self.scheduler.timesteps)):
             # Switch DiT if necessary
@@ -2133,6 +2141,12 @@ def model_fn_wan_video(
     ] = None,
     **kwargs,
 ):
+    if dit is None:
+        raise RuntimeError(
+            "model_fn_wan_video received an empty DiT module. Verify that the pipeline "
+            "has successfully loaded the 'wan_video_dit' checkpoint before running inference."
+        )
+
     if sliding_window_size is not None and sliding_window_stride is not None:
         model_kwargs = dict(
             dit=dit,
